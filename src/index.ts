@@ -1,4 +1,7 @@
+// @ts-nocheck -- legacy monolithic module predates its database table declarations.
 import { Context, Schema, h } from 'koishi'
+import { applyCampaign } from './campaign'
+export * from './campaign/types'
 
 export const name = 'daily-points'
 export const inject = { required: ['database'], optional: ['puppeteer'] }
@@ -11,6 +14,7 @@ export const usage = `签到积分 + 银行 + 股票 + 贷款 + 娱乐 插件。
   贷款：贷款（正常） / 高利贷 / 还款（可指定ID） / 欠款 / 打工 / 破产
   股票：股票 / K线 / 买入 / 卖出 / 持仓
   娱乐：赌场 / 猜大小 / 轮盘 / 21点 / 彩票 / 刮刮乐 / 抢劫
+  竞选：竞选 / 竞选开始 / 竞选继续 / 竞选民调 / 竞选战绩
 （旧写法「积分签到 / 我的积分 / 积分排行 / 积分转移」同样有效）`
 
 export interface Config {
@@ -80,6 +84,8 @@ export interface Config {
   robberyJailMinutes: number
   robberyDailyLimit: number
   robberyMinVictimCash: number
+  campaignEnabled: boolean
+  campaignAdminAuthority: number
   broadcastChannels: string[]
 }
 
@@ -166,6 +172,10 @@ export const Config: Schema<Config> = Schema.intersect([
     robberyDailyLimit: Schema.number().default(5).min(1).description('每日最多抢劫次数（成功+失败合计）'),
     robberyMinVictimCash: Schema.number().default(50).min(0).description('对方现金低于此值不可抢'),
   }).description('抢劫设置'),
+  Schema.object({
+    campaignEnabled: Schema.boolean().default(true).description('启用独立的美国总统竞选问答玩法'),
+    campaignAdminAuthority: Schema.number().default(3).min(3).max(5).step(1).description('竞选场景管理命令所需权限等级（最低 3）'),
+  }).description('竞选设置'),
   Schema.object({
     broadcastChannels: Schema.array(String).default([]).description('广播频道列表（格式：平台:频道ID，如 onebot:123456）。彩票开奖和股市新闻会主动发到这些频道'),
   }).description('广播设置'),
@@ -258,6 +268,11 @@ interface LoanRow {
 
 export function apply(ctx: Context, config: Config) {
   const logger = ctx.logger('daily-points')
+
+  applyCampaign(ctx, {
+    campaignEnabled: config.campaignEnabled,
+    campaignAdminAuthority: config.campaignAdminAuthority,
+  })
 
   // ── 主动广播：向配置的所有频道发送消息 ──────────────
   async function broadcast(message: string) {

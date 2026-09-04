@@ -1,7 +1,81 @@
-import { Context, Schema } from 'koishi'
-
-export declare const name: string
-export declare const inject: object
-export declare const usage: string
-export declare const Config: Schema<object>
-export declare function apply(ctx: Context, config: any): void
+import { Context, Schema } from 'koishi';
+export * from './campaign/types';
+export declare const name = "daily-points";
+export declare const inject: {
+    required: string[];
+    optional: string[];
+};
+export declare const usage = "\u7B7E\u5230\u79EF\u5206 + \u94F6\u884C + \u80A1\u7968 + \u8D37\u6B3E + \u5A31\u4E50 \u63D2\u4EF6\u3002\n\u53D1\u9001\u300C\u7ECF\u6D4E\u300D\u53EF\u67E5\u770B\u5168\u90E8\u6307\u4EE4\u83DC\u5355\u3002\n\u76F4\u63A5\u53D1\u9001\u77ED\u540D\u5373\u53EF\u8C03\u7528\uFF1A\n  \u79EF\u5206\uFF1A\u7B7E\u5230 / \u67E5\u8BE2 / \u6392\u884C / \u8F6C\u79FB / \u4FEE\u6539\n  \u94F6\u884C\uFF1A\u5B58\u6B3E / \u53D6\u6B3E / \u5B9A\u671F\u5B58\u6B3E / \u5B9A\u671F\u5217\u8868 / \u5B9A\u671F\u53D6\u51FA / \u94F6\u884C\uFF08\u8D44\u4EA7\u603B\u89C8\uFF09\n  \u8D37\u6B3E\uFF1A\u8D37\u6B3E\uFF08\u6B63\u5E38\uFF09 / \u9AD8\u5229\u8D37 / \u8FD8\u6B3E\uFF08\u53EF\u6307\u5B9AID\uFF09 / \u6B20\u6B3E / \u6253\u5DE5 / \u7834\u4EA7\n  \u80A1\u7968\uFF1A\u80A1\u7968 / K\u7EBF / \u4E70\u5165 / \u5356\u51FA / \u6301\u4ED3\n  \u5A31\u4E50\uFF1A\u8D4C\u573A / \u731C\u5927\u5C0F / \u8F6E\u76D8 / 21\u70B9 / \u5F69\u7968 / \u522E\u522E\u4E50 / \u62A2\u52AB\n  \u7ADE\u9009\uFF1A\u7ADE\u9009 / \u7ADE\u9009\u5F00\u59CB / \u7ADE\u9009\u7EE7\u7EED / \u7ADE\u9009\u6C11\u8C03 / \u7ADE\u9009\u6218\u7EE9\n\uFF08\u65E7\u5199\u6CD5\u300C\u79EF\u5206\u7B7E\u5230 / \u6211\u7684\u79EF\u5206 / \u79EF\u5206\u6392\u884C / \u79EF\u5206\u8F6C\u79FB\u300D\u540C\u6837\u6709\u6548\uFF09";
+export interface Config {
+    basePoints: number;
+    minBonus: number;
+    maxBonus: number;
+    streakBonusPerDay: number;
+    maxStreakBonus: number;
+    timezoneOffset: number;
+    leaderboardSize: number;
+    bankHourlyRate: number;
+    fixedRate3: number;
+    fixedRate7: number;
+    fixedRate30: number;
+    loanEnabled: boolean;
+    loanRate3: number;
+    loanRate7: number;
+    loanRate30: number;
+    loanCreditRatio: number;
+    loanMinLimit: number;
+    loanOverdueMultiplier: number;
+    sharkRate: number;
+    sharkTermHours: number;
+    sharkMaxAmount: number;
+    sharkMaxTotal: number;
+    sharkOverdueMultiplier: number;
+    collectorIntervalHours: number;
+    workCooldownMinutes: number;
+    workMin: number;
+    workMax: number;
+    workGarnishRate: number;
+    bankruptPenaltyDays: number;
+    stockEnabled: boolean;
+    stockIntervalMinutes: number;
+    stockVolatility: number;
+    stockMaxCount: number;
+    ipoPeriods: number;
+    stockEventChance: number;
+    dividendChance: number;
+    dividendRate: number;
+    casinoEnabled: boolean;
+    casinoHouseEdge: number;
+    casinoMinBet: number;
+    casinoMaxBet: number;
+    casinoCooldownSeconds: number;
+    blackjackStandOn: number;
+    lotteryEnabled: boolean;
+    lotteryPrice: number;
+    lotteryDigits: number;
+    lotteryIntervalHours: number;
+    lotteryMaxTicketsPerUser: number;
+    scratchEnabled: boolean;
+    scratchPrice: number;
+    scratchConsolation: number;
+    scratchSmall: number;
+    scratchMid: number;
+    scratchBig: number;
+    scratchChanceConsolation: number;
+    scratchChanceSmall: number;
+    scratchChanceMid: number;
+    scratchChanceBig: number;
+    robberyEnabled: boolean;
+    robberySuccessRate: number;
+    robberySuccessPct: number;
+    robberyFailPct: number;
+    robberyCooldownMinutes: number;
+    robberyJailMinutes: number;
+    robberyDailyLimit: number;
+    robberyMinVictimCash: number;
+    campaignEnabled: boolean;
+    campaignAdminAuthority: number;
+    broadcastChannels: string[];
+}
+export declare const Config: Schema<Config>;
+export declare function apply(ctx: Context, config: Config): void;
