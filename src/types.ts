@@ -92,6 +92,121 @@ export interface SectorRow {
   icon: string         // 板块 emoji，如 '🔬'
 }
 
+/** v1.13.0：区域行情（房地产） */
+export interface PropertyZoneRow {
+  code: string
+  name: string
+  icon: string
+  basePrice: number
+  currentPrice: number
+  trend: number
+  bubbleIndex: number
+  lastEvent: string
+  lastEventAt: Date | null
+  haltedUntil: Date | null
+  policyNote: string
+  updatedAt: Date
+}
+
+/** v1.13.0：用户房产 */
+export interface PropertyRow {
+  id: number
+  userId: string
+  zoneCode: string
+  type: string
+  quality: number
+  boughtPrice: number
+  boughtAt: Date
+  currentValue: number
+  renting: number
+  lastRentAt: Date
+  accumulatedRent: number
+  status: string
+  soldAt: Date | null
+  soldPrice: number
+  // ── v1.14.0：烂尾 + P2P ──
+  isDerelict: number         // 0 / 1
+  listedForSale: number      // 0 / 1：是否已挂牌（P2P 出售中）
+  listedPrice: number        // 挂牌价
+  listedAt: Date | null      // 挂牌时间
+}
+
+/** v1.13.0：区域价格历史（K线） */
+export interface PropertyHistoryRow {
+  id: number
+  zoneCode: string
+  price: number
+  time: Date
+  event: string
+}
+
+/** v1.13.0：政策/灾害事件 */
+export interface PropertyEventRow {
+  id: number
+  zoneCode: string
+  type: string
+  severity: number
+  message: string
+  startedAt: Date
+  expiresAt: Date | null
+}
+
+/** v1.15.0：赌石 — 类型种子（5 类原石） */
+export interface StoneTypeRow {
+  code: string
+  name: string
+  icon: string
+  description: string
+  basePrice: number
+  affixPool: string          // JSON 数组字符串
+  rarityWeights: string      // JSON 对象字符串
+  updatedAt: Date
+}
+
+/** v1.15.0：赌石 — 当前市场库存 */
+export interface StoneMarketRow {
+  id: number
+  stoneType: string
+  priceTier: number
+  listedAt: Date
+  expiresAt: Date
+}
+
+/** v1.15.0：赌石 — 用户背包 */
+export interface StoneInventoryRow {
+  id: number
+  userId: string
+  stoneType: string
+  priceTier: number
+  boughtAt: Date
+  cutAt: Date | null
+  rarity: string | null
+  affixes: string            // JSON 数组字符串
+  saleMultiplier: number     // 词条价值加和（砖头 = 0.05）
+  status: 'holding' | 'cut' | 'sold' | string
+  soldAt: Date | null
+  soldValue: number
+}
+
+/** v1.15.0：赌石 — 词条图鉴 */
+export interface StoneCodexRow {
+  id: number
+  userId: string
+  stoneType: string
+  affixCode: string
+  discoveredAt: Date
+}
+
+/** 词条数据（运行时解析自 affixPool JSON） */
+export interface StoneAffix {
+  code: string
+  name: string
+  value: number              // 加成比例，如 0.50 = +50%
+}
+
+/** 稀有度枚举（runtime 值） */
+export type StoneRarity = 'brick' | 'common' | 'rare' | 'epic' | 'legendary' | 'supreme'
+
 export interface MetaRow {
   key: string
   value: string

@@ -9,6 +9,8 @@ export interface LotteryDeps {
         getCasinoPool(): Promise<{
             amount: number;
         }>;
+        /** 从赌场奖池抽走最多 amount 积分，返回实际抽走的金额 */
+        transferFromCasinoPool(amount: number): Promise<number>;
     };
     logger: import('koishi').Logger;
 }
@@ -19,5 +21,5 @@ export interface LotteryHelpers {
     /** 检查奖池是否跨过里程碑（用于买票后即时触发） */
     checkPoolMilestones?(poolAmount: number): Promise<void>;
 }
-/** 彩票系统：买票 + 定期开奖 + 全局奖池滚存 */
+/** 彩票系统：买票 + 定期开奖 + 多档奖项 + 赌场奖池注入 */
 export declare function registerLottery({ ctx, config, core, casino, logger }: LotteryDeps): LotteryHelpers;

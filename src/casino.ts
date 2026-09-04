@@ -12,10 +12,12 @@ export interface CasinoDeps {
 export interface CasinoHelpers {
   /** 获取/初始化赌场奖池，返回当前行 */
   getCasinoPool(): Promise<{ id: number; amount: number; updatedAt: Date }>
-  /** 往奖池添加金额（按当前值上浮） */
+  /** 往奖池添加金额（按当前值上浮；delta 可负表示抽出） */
   feedCasinoPool(delta: number): Promise<number>
-  /** 抽干奖池（未使用，留给彩票等） */
+  /** 抽干奖池（清零并返回原值） */
   drainCasinoPool(): Promise<number>
+  /** 按需从赌场奖池抽走最多 amount 积分，返回实际抽走的金额（奖池不足则抽走全部） */
+  transferFromCasinoPool(amount: number): Promise<number>
 }
 
 /** 赌场系统：猜大小 / 轮盘 / 21点 + 奖池 */
@@ -30,7 +32,7 @@ export function registerCasino({ ctx, config, core }: CasinoDeps): CasinoHelpers
 
   async function feedCasinoPool(delta: number): Promise<number> {
     const pool = await getCasinoPool()
-    const next = Math.round((pool.amount + delta) * 100) / 100
+    const next = Math.max(0, Math.round((pool.amount + delta) * 100) / 100)
     await ctx.database.set('daily_casino_pool', { id: 1 }, { amount: next, updatedAt: new Date() })
     return next
   }
@@ -39,6 +41,20 @@ export function registerCasino({ ctx, config, core }: CasinoDeps): CasinoHelpers
     const pool = await getCasinoPool()
     await ctx.database.set('daily_casino_pool', { id: 1 }, { amount: 0, updatedAt: new Date() })
     return pool.amount
+  }
+
+  /**
+   * 按需从赌场奖池抽走最多 amount 积分，返回实际抽走的金额（奖池不足则抽走全部）。
+   * 给彩票等"向奖池提款"的场景用：负向 feedCasinoPool + 返回值钳到 [0, amount]。
+   */
+  async function transferFromCasinoPool(amount: number): Promise<number> {
+    if (amount <= 0) return 0
+    const pool = await getCasinoPool()
+    const actual = Math.min(amount, Math.max(0, pool.amount))
+    if (actual <= 0) return 0
+    const next = Math.max(0, Math.round((pool.amount - actual) * 100) / 100)
+    await ctx.database.set('daily_casino_pool', { id: 1 }, { amount: next, updatedAt: new Date() })
+    return actual
   }
 
   /** 检查并执行下注前冷却（公用） */
@@ -110,11 +126,15 @@ export function registerCasino({ ctx, config, core }: CasinoDeps): CasinoHelpers
       }
       const poolFee = Math.floor(n * config.casinoHouseEdge)
       const newPool = await feedCasinoPool(poolFee)
-      return [
-        `🎲 骰子：${d1} + ${d2} = ${sum}${result.reason ? `（${result.reason}）` : `（${pickEn === 'big' ? '小' : '大'}）`}`,
-        `❌ 没中，输掉 ${n}，其中 ${poolFee} 入赌场奖池（奖池 ${fmtMoney(newPool)}）`,
-        `当前现金：${row.points - n}`,
-      ].join('\n')
+      return await core.dbTx(async (db) => {
+        const dbAny: any = db
+        await dbAny.set('daily_points', { userId: key }, { points: row.points - n })
+        return [
+          `🎲 骰子：${d1} + ${d2} = ${sum}${result.reason ? `（${result.reason}）` : `（${pickEn === 'big' ? '小' : '大'}）`}`,
+          `❌ 没中，输掉 ${n}，其中 ${poolFee} 入赌场奖池（奖池 ${fmtMoney(newPool)}）`,
+          `当前现金：${row.points - n}`,
+        ].join('\n')
+      })
     })
 
   ctx.command('经济/娱乐/赌场/轮盘 <amount:string> <choice:string>', '轮盘：红/黑/单/双，1:1 赔率')
@@ -162,11 +182,15 @@ export function registerCasino({ ctx, config, core }: CasinoDeps): CasinoHelpers
       }
       const poolFee = Math.floor(n * config.casinoHouseEdge)
       const newPool = await feedCasinoPool(poolFee)
-      return [
-        `🎡 轮盘球落 ${ball}（${colorLabel}）`,
-        ball === 0 ? `❌ 球落 0，所有押注通吃` : `❌ 没中「${choiceLabel}」，输掉 ${n}，其中 ${poolFee} 入赌场奖池（奖池 ${fmtMoney(newPool)}）`,
-        `当前现金：${row.points - n}`,
-      ].join('\n')
+      return await core.dbTx(async (db) => {
+        const dbAny: any = db
+        await dbAny.set('daily_points', { userId: key }, { points: row.points - n })
+        return [
+          `🎡 轮盘球落 ${ball}（${colorLabel}）`,
+          ball === 0 ? `❌ 球落 0，所有押注通吃` : `❌ 没中「${choiceLabel}」，输掉 ${n}，其中 ${poolFee} 入赌场奖池（奖池 ${fmtMoney(newPool)}）`,
+          `当前现金：${row.points - n}`,
+        ].join('\n')
+      })
     })
 
   function bjScore(hand: { rank: string }[]) {
@@ -227,16 +251,24 @@ export function registerCasino({ ctx, config, core }: CasinoDeps): CasinoHelpers
       if (pBust && dBust) {
         const poolFee = Math.floor(n * config.casinoHouseEdge)
         const newPool = await feedCasinoPool(poolFee)
-        lines.push(`💥 双爆，按惯例算庄家赢，输掉 ${n}（其中 ${poolFee} 入奖池 ${fmtMoney(newPool)}）`)
-        lines.push(`当前现金：${row.points - n}`)
-        return lines.join('\n')
+        return await core.dbTx(async (db) => {
+          const dbAny: any = db
+          await dbAny.set('daily_points', { userId: key }, { points: row.points - n })
+          lines.push(`💥 双爆，按惯例算庄家赢，输掉 ${n}（其中 ${poolFee} 入奖池 ${fmtMoney(newPool)}）`)
+          lines.push(`当前现金：${row.points - n}`)
+          return lines.join('\n')
+        })
       }
       if (pBust) {
         const poolFee = Math.floor(n * config.casinoHouseEdge)
         const newPool = await feedCasinoPool(poolFee)
-        lines.push(`❌ 爆牌，输掉 ${n}（其中 ${poolFee} 入奖池 ${fmtMoney(newPool)}）`)
-        lines.push(`当前现金：${row.points - n}`)
-        return lines.join('\n')
+        return await core.dbTx(async (db) => {
+          const dbAny: any = db
+          await dbAny.set('daily_points', { userId: key }, { points: row.points - n })
+          lines.push(`❌ 爆牌，输掉 ${n}（其中 ${poolFee} 入奖池 ${fmtMoney(newPool)}）`)
+          lines.push(`当前现金：${row.points - n}`)
+          return lines.join('\n')
+        })
       }
       if (dBust) {
         const payout = n * 2
@@ -258,9 +290,13 @@ export function registerCasino({ ctx, config, core }: CasinoDeps): CasinoHelpers
       }
       const poolFee = Math.floor(n * config.casinoHouseEdge)
       const newPool = await feedCasinoPool(poolFee)
-      lines.push(`❌ ${pScore} vs ${dScore}，点数小或平，输掉 ${n}（其中 ${poolFee} 入奖池 ${fmtMoney(newPool)}）`)
-      lines.push(`当前现金：${row.points - n}`)
-      return lines.join('\n')
+      return await core.dbTx(async (db) => {
+        const dbAny: any = db
+        await dbAny.set('daily_points', { userId: key }, { points: row.points - n })
+        lines.push(`❌ ${pScore} vs ${dScore}，点数小或平，输掉 ${n}（其中 ${poolFee} 入奖池 ${fmtMoney(newPool)}）`)
+        lines.push(`当前现金：${row.points - n}`)
+        return lines.join('\n')
+      })
     })
 
   // ── v1.9.0 新增：老虎机 / 百家乐 / 牛牛 ─────────────────────
@@ -316,9 +352,13 @@ export function registerCasino({ ctx, config, core }: CasinoDeps): CasinoHelpers
       }
       const poolFee = Math.floor(n * config.casinoHouseEdge)
       const newPool = await feedCasinoPool(poolFee)
-      lines.push(`❌ 三个都不一样，输掉 ${n}（其中 ${poolFee} 入奖池 ${fmtMoney(newPool)}）`)
-      lines.push(`当前现金：${row.points - n}`)
-      return lines.join('\n')
+      return await core.dbTx(async (db) => {
+        const dbAny: any = db
+        await dbAny.set('daily_points', { userId: key }, { points: row.points - n })
+        lines.push(`❌ 三个都不一样，输掉 ${n}（其中 ${poolFee} 入奖池 ${fmtMoney(newPool)}）`)
+        lines.push(`当前现金：${row.points - n}`)
+        return lines.join('\n')
+      })
     })
 
   ctx.command('经济/娱乐/赌场/百家乐 <amount:string> <pick:string>', '百家乐：庄/闲/和，赔率 0.95 / 1.0 / 8.0')
@@ -358,9 +398,13 @@ export function registerCasino({ ctx, config, core }: CasinoDeps): CasinoHelpers
       }
       const poolFee = Math.floor(n * config.casinoHouseEdge)
       const newPool = await feedCasinoPool(poolFee)
-      lines.push(`❌ 没中，输掉 ${n}（其中 ${poolFee} 入奖池 ${fmtMoney(newPool)}）`)
-      lines.push(`当前现金：${row.points - n}`)
-      return lines.join('\n')
+      return await core.dbTx(async (db) => {
+        const dbAny: any = db
+        await dbAny.set('daily_points', { userId: key }, { points: row.points - n })
+        lines.push(`❌ 没中，输掉 ${n}（其中 ${poolFee} 入奖池 ${fmtMoney(newPool)}）`)
+        lines.push(`当前现金：${row.points - n}`)
+        return lines.join('\n')
+      })
     })
 
   ctx.command('经济/娱乐/赌场/牛牛 <amount:string>', '牛牛：抽 5 张，凑出 3 张整 10 倍数算有牛，1:2 赢')
@@ -398,10 +442,14 @@ export function registerCasino({ ctx, config, core }: CasinoDeps): CasinoHelpers
       }
       const poolFee = Math.floor(n * config.casinoHouseEdge)
       const newPool = await feedCasinoPool(poolFee)
-      lines.push(`❌ 无牛，输掉 ${n}（其中 ${poolFee} 入奖池 ${fmtMoney(newPool)}）`)
-      lines.push(`当前现金：${row.points - n}`)
-      return lines.join('\n')
+      return await core.dbTx(async (db) => {
+        const dbAny: any = db
+        await dbAny.set('daily_points', { userId: key }, { points: row.points - n })
+        lines.push(`❌ 无牛，输掉 ${n}（其中 ${poolFee} 入奖池 ${fmtMoney(newPool)}）`)
+        lines.push(`当前现金：${row.points - n}`)
+        return lines.join('\n')
+      })
     })
 
-  return { getCasinoPool, feedCasinoPool, drainCasinoPool }
+  return { getCasinoPool, feedCasinoPool, drainCasinoPool, transferFromCasinoPool }
 }

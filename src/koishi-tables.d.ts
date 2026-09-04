@@ -50,6 +50,7 @@ declare module 'koishi' {
       updatedAt: Date
       haltedUntil?: Date | null
       note?: string | null
+      sector?: string | null
     }
     daily_stock_history: {
       id: number
@@ -86,12 +87,28 @@ declare module 'koishi' {
       winnerId: string | null
       ticketCount: number
       carriedOver: number
+      casinoContribution: number
+      basePool: number
+      ticketRevenue: number
+      poolTotal: number
+      payoutTotal: number
+      winningTier: string
     }
     daily_lottery_tickets: {
       id: number
       period: number
       userId: string
       number: string
+      createdAt: Date
+    }
+    daily_lottery_winners: {
+      id: number
+      period: number
+      userId: string
+      number: string
+      tier: string
+      matchedCount: number
+      prize: number
       createdAt: Date
     }
     daily_scratch_log: {
@@ -154,6 +171,95 @@ declare module 'koishi' {
       impactBias: number
       lastEvent: string
       lastEventAt: Date
+    }
+    daily_property_zones: {
+      code: string
+      name: string
+      icon: string
+      basePrice: number
+      currentPrice: number
+      trend: number
+      bubbleIndex: number
+      lastEvent: string
+      lastEventAt: Date
+      haltedUntil: Date | null
+      policyNote: string
+      updatedAt: Date
+    }
+    daily_properties: {
+      id: number
+      userId: string
+      zoneCode: string
+      type: string
+      quality: number
+      boughtPrice: number
+      boughtAt: Date
+      currentValue: number
+      renting: number
+      lastRentAt: Date
+      accumulatedRent: number
+      status: string
+      soldAt: Date | null
+      soldPrice: number
+      // v1.14.0
+      isDerelict: number
+      listedForSale: number
+      listedPrice: number
+      listedAt: Date | null
+    }
+    daily_property_history: {
+      id: number
+      zoneCode: string
+      price: number
+      time: Date
+      event: string
+    }
+    daily_property_events: {
+      id: number
+      zoneCode: string
+      type: string
+      severity: number
+      message: string
+      startedAt: Date
+      expiresAt: Date | null
+    }
+    daily_stone_types: {
+      code: string
+      name: string
+      icon: string
+      description: string
+      basePrice: number
+      affixPool: string
+      rarityWeights: string
+      updatedAt: Date
+    }
+    daily_stone_market: {
+      id: number
+      stoneType: string
+      priceTier: number
+      listedAt: Date
+      expiresAt: Date
+    }
+    daily_stone_inventory: {
+      id: number
+      userId: string
+      stoneType: string
+      priceTier: number
+      boughtAt: Date
+      cutAt: Date | null
+      rarity: string | null
+      affixes: string
+      saleMultiplier: number
+      status: string
+      soldAt: Date | null
+      soldValue: number
+    }
+    daily_stone_codex: {
+      id: number
+      userId: string
+      stoneType: string
+      affixCode: string
+      discoveredAt: Date
     }
   }
 

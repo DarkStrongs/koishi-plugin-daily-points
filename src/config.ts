@@ -77,6 +77,14 @@ export interface Config {
   lotteryDigits: number
   lotteryIntervalHours: number
   lotteryMaxTicketsPerUser: number
+  /** 基础奖池：每期开奖注入的固定金额（0 表示关闭） */
+  lotteryBasePool: number
+  /** 是否把当期赌场奖池全额注入彩票（每期开奖扣走） */
+  lotteryIncludeCasinoPool: boolean
+  /** 各档派奖比例（5 档：特/一/二/三/安慰，剩余自动滚存下期）。建议总和 ≤ 1 */
+  lotteryTierPayouts: number[]
+  /** 各档匹配位数阈值（按特→安慰顺序；特等奖 = digits，末档 = 0 表示未中不奖） */
+  lotteryMatchLevels: number[]
 
   // 刮刮乐
   scratchEnabled: boolean
@@ -107,6 +115,85 @@ export interface Config {
   robberyRevengeBoost: number
   robberyStreakLossThreshold: number
   robberyStreakLossMultiplier: number
+
+  // 房地产（v1.13.0）：买房 / 卖房 / 出租 / 收租 / 泡沫破裂 / 政策 / 灾害
+  propertyEnabled: boolean
+  /** 房产行情刷新间隔（小时）；越短波动越频繁 */
+  propertyUpdateIntervalHours: number
+  /** 每 tick 随机涨跌基础幅度（百分比，0.05 = ±5%） */
+  propertyTickVolatility: number
+  /** 收租间隔（小时）：每 N 小时按租收益率发一次租金 */
+  propertyRentIntervalHours: number
+  /** 基础租收益率（每次发租 = 房价 × 此比例 × 经过小时数）；类型会加成 */
+  propertyRentYieldBase: number
+  /** 持有税（每年占房价的比例，每次刷价时按持有时长扣）；0.02 = 2% / 年 */
+  propertyTaxRate: number
+  /** 交易税（买卖时按成交额扣），0.05 = 5% */
+  propertyTradeTax: number
+  /** 每次刷新时泡沫积累概率上限（基于 trend 与随机） */
+  propertyBubbleMaxIncrease: number
+  /** 泡沫指数阈值：>= 此值触发泡沫破裂（暴跌） */
+  propertyBubbleThreshold: number
+  /** 泡沫破裂时价格暴跌比例（0.5 = 跌 50%）；同时清零泡沫 */
+  propertyCrashRatio: number
+  /** 每 tick 政策调控触发概率（含限购/限售/加税） */
+  propertyPolicyChance: number
+  /** 每 tick 自然灾害触发概率（含地震/洪水） */
+  propertyDisasterChance: number
+  /** 每 tick 利率上调触发概率；上调后估值下降 N% */
+  propertyInterestUpChance: number
+  /** 单用户最大持有房产数 */
+  propertyMaxProperties: number
+
+  // ─── v1.14.0：烂尾楼 + P2P 挂牌 + 升值 / 危机政策 ───
+  /** 买房时买到烂尾楼的概率（0.08 = 8%） */
+  propertyDerelictChance: number
+  /** 烂尾楼折扣（0.5 = 5 折），原始价格 × 此系数 */
+  propertyDerelictDiscount: number
+  /** 烂尾楼租金系数（0 = 完全不出租，0.1 = 仅 10% 租金） */
+  propertyDerelictRentFactor: number
+  /** 每 tick 烂尾整治处理概率（0.5 = 50% 概率会影响到该区域烂尾楼） */
+  propertyDerelictRescueChance: number
+  /** 烂尾整治"回购"路径时给原房主的返还比例（0.3 = 30%） */
+  propertyDerelictBuybackRate: number
+  /** 烂尾整治"完工"路径的相对估值提升比例（0.5 = 估值回升 50%） */
+  propertyDerelictRestoreMul: number
+  /** P2P 挂牌默认有效期（小时，过期自动撤回） */
+  propertyListingExpiryHours: number
+  /** P2P 挂牌服务费比例（0.02 = 2% 平台抽成，与交易税分开） */
+  propertyListingFee: number
+  /** 每 tick 升值政策触发概率（旧改 / 新区规划 / 地铁 / 经济特区 / 利率下调） */
+  propertyAppreciationChance: number
+  /** 每 tick 危机政策触发概率（强制拆迁 等） */
+  propertyCrisisChance: number
+  /** 每 tick 利率下调触发概率；下调后该 tick 估值上升 N% */
+  propertyInterestDownChance: number
+
+  // ─── v1.15.0：赌石（收藏型积分回收）系统 ───
+  /** 启用赌石 */
+  stoneEnabled: boolean
+  /** 5 档原石购入价（积分）；索引对应 priceTier 0..4 */
+  stonePriceTiers: number[]
+  /** 市场刷新间隔（小时） */
+  stoneMarketRefreshHours: number
+  /** 单次刷新时的库存数量 */
+  stoneMarketStockSize: number
+  /** 单玩家每日最多买入的石头数 */
+  stoneDailyPurchaseLimit: number
+  /** 单玩家每日买入原石的总花费上限（积分）；0 = 不限 */
+  stoneDailyAmountLimit: number
+  /** 持有每日涨价率（复利，0.05 = 每日 +5%） */
+  stoneHoldingDailyRate: number
+  /** 持有软上限倍数（达到 N × basePrice 后涨价率衰减为 stoneHoldingDecayRate） */
+  stoneHoldingSoftCapMul: number
+  /** 软上限之后的涨价率（0.02 = 每日 +2%） */
+  stoneHoldingDecayRate: number
+  /** 持有硬上限倍数（达到后停止累计） */
+  stoneHoldingHardCapMul: number
+  /** 卖出后流回赌场池的比例（剩余部分销毁，积分回收器核心） */
+  stoneCasinoPoolRate: number
+  /** 砖头(0词条)的最低保护退款率（0.05 = 仅退 5% 成本） */
+  stoneBrickProtectionRate: number
 
   // 广播
   broadcastChannels: string[]
@@ -188,6 +275,10 @@ export const Config = Schema.intersect([
     lotteryDigits: Schema.number().default(6).min(3).max(8).description('每位数字（每位 0-9，总组合数 = 10^digits）'),
     lotteryIntervalHours: Schema.number().default(1).min(0.1).description('开奖间隔（小时）'),
     lotteryMaxTicketsPerUser: Schema.number().default(20).min(1).description('单期单人最多买几注'),
+    lotteryBasePool: Schema.number().default(1000000).min(0).description('基础奖池：每期开奖注入的固定金额（0 = 关闭）'),
+    lotteryIncludeCasinoPool: Schema.boolean().default(true).description('是否把当期赌场奖池全额注入彩票（每期开奖扣走）'),
+    lotteryTierPayouts: Schema.array(Schema.number().min(0).max(1)).default([0.50, 0.20, 0.15, 0.10, 0.05]).description('5 档派奖比例 [特,一,二,三,安慰]，剩余自动滚存下期'),
+    lotteryMatchLevels: Schema.array(Schema.number().min(0)).default([6, 5, 4, 3, 1]).description('5 档匹配位数阈值 [特,一,二,三,安慰]，默认 6 位数字下分别要求 6/5/4/3/1 位匹配'),
   }).description('彩票设置'),
   Schema.object({
     scratchEnabled: Schema.boolean().default(true).description('启用刮刮乐'),
@@ -219,6 +310,47 @@ export const Config = Schema.intersect([
     robberyStreakLossThreshold: Schema.number().default(3).min(2).description('连续失败 N 次触发加刑'),
     robberyStreakLossMultiplier: Schema.number().default(2).min(1).max(5).step(0.5).description('连续失败超过阈值后刑期倍数'),
   }).description('抢劫削弱模式（v1.10.0 起生效）'),
+  Schema.object({
+    propertyEnabled: Schema.boolean().default(true).description('启用房地产系统'),
+    propertyUpdateIntervalHours: Schema.number().default(2).min(0.1).description('房产行情刷新间隔（小时）；越短波动越频繁'),
+    propertyTickVolatility: Schema.number().default(0.05).min(0).max(0.3).step(0.01).description('每 tick 随机涨跌基础幅度（0.05 = ±5%）'),
+    propertyRentIntervalHours: Schema.number().default(6).min(1).description('收租间隔（小时）；到达后自动结算持有出租房的租金'),
+    propertyRentYieldBase: Schema.number().default(0.001).min(0).max(0.05).step(0.0001).description('基础租收益率（每次发租 = 当前估值 × 此比例 × 经过小时数）；类型会按倍率加成'),
+    propertyTaxRate: Schema.number().default(0.02).min(0).max(0.2).step(0.005).description('年化持有税（每次刷价时按持有时长扣，0.02 = 2% / 年）'),
+    propertyTradeTax: Schema.number().default(0.05).min(0).max(0.2).step(0.01).description('交易税（买卖时按成交额扣，0.05 = 5%）'),
+    propertyBubbleMaxIncrease: Schema.number().default(15).min(0).max(50).step(1).description('每 tick 泡沫指数最大增加值（涨幅越大积累越快）'),
+    propertyBubbleThreshold: Schema.number().default(80).min(50).max(100).step(5).description('泡沫指数阈值：>= 此值时下一次 tick 必触发破裂'),
+    propertyCrashRatio: Schema.number().default(0.5).min(0.1).max(0.9).step(0.05).description('泡沫破裂时价格暴跌比例（0.5 = 跌 50%）；同时清零泡沫'),
+    propertyPolicyChance: Schema.number().default(0.05).min(0).max(1).step(0.01).description('每 tick 政策调控触发概率（限购 / 限售 / 加税）'),
+    propertyDisasterChance: Schema.number().default(0.03).min(0).max(1).step(0.01).description('每 tick 自然灾害触发概率（地震 / 洪水）'),
+    propertyInterestUpChance: Schema.number().default(0.04).min(0).max(1).step(0.01).description('每 tick 利率上调触发概率；上调后该 tick 估值下降'),
+    propertyMaxProperties: Schema.number().default(10).min(1).max(50).description('单用户最大持有房产数'),
+    propertyDerelictChance: Schema.number().default(0.08).min(0).max(1).step(0.01).description('买房时买到烂尾楼的概率（0.08 = 8%）'),
+    propertyDerelictDiscount: Schema.number().default(0.5).min(0.1).max(1).step(0.05).description('烂尾楼折扣（0.5 = 5 折）；原价 × 此比例'),
+    propertyDerelictRentFactor: Schema.number().default(0).min(0).max(1).step(0.05).description('烂尾楼租金系数（0 = 完全不出租，0.1 = 仅 10% 租金）'),
+    propertyDerelictRescueChance: Schema.number().default(0.5).min(0).max(1).step(0.05).description('每 tick 烂尾整治触发概率（0.5 = 50%）'),
+    propertyDerelictBuybackRate: Schema.number().default(0.3).min(0.1).max(1).step(0.05).description('烂尾整治"强制回购"时的现金返还比例（0.3 = 30%）'),
+    propertyDerelictRestoreMul: Schema.number().default(0.5).min(0.1).max(1).step(0.05).description('烂尾整治"修复完工"时估值回升比例（0.5 = 回升 50%）'),
+    propertyListingExpiryHours: Schema.number().default(168).min(1).max(720).description('P2P 挂牌默认有效期（小时，过期自动撤回）'),
+    propertyListingFee: Schema.number().default(0.02).min(0).max(0.2).step(0.01).description('P2P 挂牌服务费（0.02 = 平台抽成 2%）'),
+    propertyAppreciationChance: Schema.number().default(0.05).min(0).max(1).step(0.01).description('每 tick 升值政策触发概率（旧改/新区/地铁/特区/利率下调 等）'),
+    propertyCrisisChance: Schema.number().default(0.04).min(0).max(1).step(0.01).description('每 tick 危机政策触发概率（强制拆迁/烂尾清理等）'),
+    propertyInterestDownChance: Schema.number().default(0.04).min(0).max(1).step(0.01).description('每 tick 利率下调触发概率；下调后该 tick 估值上升'),
+  }).description('房地产设置（v1.13.0+，v1.14.0 新增烂尾楼 / P2P 挂牌 / 升值危机政策）'),
+  Schema.object({
+    stoneEnabled: Schema.boolean().default(true).description('启用赌石系统（v1.15.0）。关闭后整个赌石菜单不可用。'),
+    stonePriceTiers: Schema.array(Schema.number().min(1)).default([100, 1000, 10000, 50000, 100000]).description('5 档原石购入价（积分）。索引 0..4。玩家在赌石市场只能看到这 5 档。'),
+    stoneMarketRefreshHours: Schema.number().default(24).min(1).max(168).description('原石市场刷新周期（小时）。到点自动清空过期库存、补满 stoneMarketStockSize 块。'),
+    stoneMarketStockSize: Schema.number().default(30).min(5).max(200).description('单次市场刷新时的库存数量。0 = 关闭市场刷新但保留现有库存。'),
+    stoneDailyPurchaseLimit: Schema.number().default(50).min(1).max(500).description('单玩家每日最多买入多少块原石（不论什么档）。防刷。'),
+    stoneDailyAmountLimit: Schema.number().default(1000000).min(0).description('单玩家每日买入原石的总花费上限（积分）。0 = 不限。富玩家冲动下单阻断。'),
+    stoneHoldingDailyRate: Schema.number().default(0.05).min(0).max(0.5).step(0.01).description('持有每日涨价率（复利）。0.05 = 每天在当前值基础上 +5%。'),
+    stoneHoldingSoftCapMul: Schema.number().default(30).min(2).max(200).description('持有软上限倍数（×basePrice 算）。达到此值后涨价率切换为 stoneHoldingDecayRate。'),
+    stoneHoldingDecayRate: Schema.number().default(0.02).min(0).max(0.2).step(0.005).description('软上限之后的涨价率（0.02 = 每天 +2%）。'),
+    stoneHoldingHardCapMul: Schema.number().default(100).min(5).max(500).description('持有硬上限倍数（×basePrice 算）。达到此值后停止累计，防无限囤积。'),
+    stoneCasinoPoolRate: Schema.number().default(0.2).min(0).max(1).step(0.05).description('卖出后流回赌场池的比例（剩余部分销毁）。0.2 = 20% 喂赌场池，80% 销毁。这就是积分回收的核心。'),
+    stoneBrickProtectionRate: Schema.number().default(0.05).min(0).max(0.5).step(0.01).description('砖头(0词条)立即卖出的最低退款比例（× basePrice）。0.05 = 仅退 5%。'),
+  }).description('赌石系统设置（v1.15.0 收藏型积分回收）'),
   Schema.object({
     broadcastChannels: Schema.array(String).default([]).description('广播频道列表（格式：平台:频道ID，如 onebot:123456）。彩票开奖和股市新闻会主动发到这些频道'),
   }).description('广播设置'),

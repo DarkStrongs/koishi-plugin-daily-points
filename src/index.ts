@@ -13,6 +13,8 @@ import { registerCasino } from './casino'
 import { registerLottery } from './lottery'
 import { registerScratch } from './scratch'
 import { registerRobbery } from './robbery'
+import { registerProperty } from './property'
+import { registerStone } from './stone'
 
 export const name = 'daily-points'
 export const inject = { required: ['database'], optional: ['puppeteer'] }
@@ -24,7 +26,11 @@ export const usage = `签到积分 + 银行 + 股票 + 贷款 + 娱乐 插件。
   银行：存款 / 取款 / 定期存款 / 定期列表 / 定期取出 / 银行（资产总览）
   贷款：贷款（正常） / 高利贷 / 还款（可指定ID） / 欠款 / 打工 / 破产
   股票：股票 / 大盘 / 股票排行 / 资金流 <代码> / 持仓榜 / K线 / 买入 / 卖出 / 持仓
-  娱乐：赌场（猜大小/轮盘/21点/老虎机/百家乐/牛牛）｜彩票（支持自选号码）｜刮刮乐｜抢劫 @人
+  娱乐：赌场（猜大小/轮盘/21点/老虎机/百家乐/牛牛）｜彩票｜刮刮乐｜抢劫 @人
+  房产：买房 / 卖房 / 挂牌 / 购房 / 取消挂牌 / 挂牌列表 / 租房 / 收租 / 我的房产 / 房产市场 / 房产走势 / 政策
+  赌石：赌石市场 / 买原石 / 切石 / 卖石 / 我的原石 / 原石图鉴 / 原石排行榜 / 原石估价
+（v1.14.0：买房会买到烂尾楼、可 P2P 用户间交易、突发升值/危机政策）
+（v1.15.0：赌石 = 收藏型积分回收。买 → 切（揭示词条） → 卖/囤。囤越久收藏价值越高，卖价多半亏）
 （旧写法「积分签到 / 我的积分 / 积分排行 / 积分转移」同样有效）`
 
 // 兼容 Koishi 默认从 index 拿 Config / apply 的导出风格
@@ -55,7 +61,10 @@ export function apply(ctx: Context, config: Config) {
   const casinoHelpers = registerCasino({ ctx, config, core })
   const lotteryHelpers = registerLottery({
     ctx, config, core,
-    casino: { getCasinoPool: casinoHelpers.getCasinoPool },
+    casino: {
+      getCasinoPool: casinoHelpers.getCasinoPool,
+      transferFromCasinoPool: casinoHelpers.transferFromCasinoPool,
+    },
     logger,
   })
   registerScratch({ ctx, config, core })
@@ -63,6 +72,8 @@ export function apply(ctx: Context, config: Config) {
     ctx, config, core,
     casino: { feedCasinoPool: casinoHelpers.feedCasinoPool },
   })
+  const propertyHelpers = registerProperty({ ctx, config, core, logger })
+  const stoneHelpers = registerStone({ ctx, config, core, casino: { feedCasinoPool: casinoHelpers.feedCasinoPool } })
 
   // 4. 兼容连写（存款100、还款500、彩票3 等无空格形式）
   registerGlueMiddleware(ctx)
@@ -72,9 +83,11 @@ export function apply(ctx: Context, config: Config) {
   stockHelpers.scheduleUpdates()
   lotteryHelpers.scheduleDraws()
   bonusHelpers.scheduleMonthlyDistribution()
+  propertyHelpers.schedulePropertyUpdates()
+  stoneHelpers.scheduleStoneMarketRefresh()
 
   // 6. 经济系统总菜单（二级分组，避免 help 一屏刷满）
-  ctx.command('经济', '经济系统总菜单（积分 / 银行 / 贷款 / 股票 / 娱乐）')
+  ctx.command('经济', '经济系统总菜单（积分 / 银行 / 贷款 / 股票 / 房产 / 娱乐）')
     .action(() => {
       return [
         '🏦 经济系统指令一览',
@@ -83,7 +96,8 @@ export function apply(ctx: Context, config: Config) {
         '🏦 银行：存款｜取款｜定期存款｜定期列表｜定期取出｜银行（资产总览）',
         '💳 贷款：贷款（正常）｜高利贷｜还款（可指定ID）｜欠款｜打工｜破产',
         '📈 股票：股票（行情）｜K线（走势图）｜买入｜卖出｜持仓',
-        '🎲 娱乐：赌场（猜大小/轮盘/21点）｜彩票｜刮刮乐｜抢劫 @人',
+        '🏘️ 房产：买房｜卖房｜挂牌｜购房｜取消挂牌｜挂牌列表｜租房｜收租｜我的房产｜房产市场｜房产走势｜政策',
+        '🎲 娱乐：赌场（猜大小/轮盘/21点/老虎机/百家乐/牛牛）｜彩票（多档奖项，奖池 = 基础池 + 赌场池 + 票数收入）｜刮刮乐｜抢劫 @人',
         '',
         '直接发送指令名即可使用，无需加前缀。',
         '详细用法可发送「help 经济」或「help 指令名」查看。',
