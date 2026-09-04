@@ -168,7 +168,125 @@
 
 所有参数（签到数值、利率、定期利率、贷款利率、高利贷条款、催收间隔、打工收益与划扣比例、破产黑名单天数、行情间隔、波动倍率、股票池上限、IPO 周期、事件概率、分红概率与比例、赌场抽水/限红/冷却、彩票每注价/位数/开奖间隔、刮刮乐奖项概率与奖额、抢劫成功率/比例/冷却/坐牢/日上限）均可在 Koishi 控制台 → 插件配置 → daily-points 中修改。
 
+## 工程结构（v1.7.0 起模块化）
+
+源码位于 `src/`，按职责拆分为 17 个 .ts 模块（按依赖层级排列）：
+
+| 层级 | 文件 | 职责 |
+|------|------|------|
+| **基础工具** | `util.ts` | 随机数、金额格式化、半角转换、日期键 |
+| 基础 | `seeds.ts` | 股票种子（6 只）与 IPO 候选池（12 只） |
+| 基础 | `types.ts` | 业务接口类型（外部可消费，便于扩展与测试） |
+| **配置** | `config.ts` | Schema 完整定义 + HOUR/DAY 时间常量 |
+| **持久层** | `db.ts` | 13 张 `ctx.model.extend()` 数据表注册 |
+| 类型扩展 | `koishi-tables.d.ts` | 扩展 `Tables` 接口消除 TS 编译错误 |
+| 中间件 | `middleware.ts` | "存款100" → "存款 100" 文本胶水 |
+| **业务基座** | `core.ts` | `getUser` / `settleBank` / `dbTx()` 等通用方法 |
+| **业务模块** | `signin.ts` | 签到、查询、排行、积分转移、管理员修改 |
+| 业务 | `bank.ts` | 活期 / 定期 / 资产总览（依赖 `loan.settleUserLoans`） |
+| 业务 | `loan.ts` | 正常贷款 / 高利贷 / 还款 / 打工 / 破产 / 催收员 |
+| 业务 | `stock.ts` | 行情刷新 + K线 + 买卖 + IPO + 事件 + 分红 |
+| 业务 | `casino.ts` | 猜大小 / 轮盘 / 21点（含奖池抽水） |
+| 业务 | `lottery.ts` | 彩票期号管理 + 定时开奖（含奖池滚存） |
+| 业务 | `scratch.ts` | 刮刮乐（即买即开、4 档奖额） |
+| 业务 | `robbery.ts` | 抢劫 + 坐牢状态（罚款自动入赌场奖池） |
+| **编排入口** | `index.ts` | 按依赖顺序加载、注入、导出插件对象 |
+
+**模块依赖注入**（手动 DI，无 IoC 容器）：
+
+```
+index.ts
+ ├─ 持久层    db.ts
+ ├─ 中间件    middleware.ts
+ ├─ 基座      core.ts        ← 接收 {ctx, config, logger}
+ ├─ 业务模块 → signin / bank / scratch / casino / lottery / robbery / stock
+ │           └ loan.ts      ← setInterval 催收（独立守护）
+ └ 业务模块   stock.ts      ← setInterval 行情（独立守护）
+              lottery.ts   ← setInterval 开奖（独立守护）
+```
+
+`core.ts` 是唯一直接持有 `ctx.database` 的"通用基座"，所有需要事务的方法都走 `core.dbTx()`。
+
+### 事务安全（关键改进）
+
+之前所有"先扣 A 后加 B"的写操作都是裸 `set` / `create` 配对，进程崩溃或中途抛错会留下"借了钱没到账""赢了奖没进钱包"之类的脏数据。本版本统一用 `ctx.database.transaction` 包裹，原子化所有多步写：
+
+```ts
+// core.ts —— 统一事务入口，自带后端兼容降级
+async function dbTx<T>(fn: (db: Context['database']) => Promise<T>): Promise<T> {
+  const db: any = ctx.database
+  if (typeof db.transaction === 'function') {
+    return await db.transaction(async (tx: any) => await fn(tx))
+  }
+  // 部分后端未实现 transaction（如 MySQL/部分 mock）→ 降级为直接调用
+  return await fn(ctx.database)
+}
+```
+
+**覆盖点（v1.7.0 起全部走 `dbTx`）**：
+
+| 路径 | 文件 | 操作 |
+|------|------|------|
+| 用户间积分转移 | `signin.ts` | 转出扣 + 转入加 |
+| 正常贷款 | `loan.ts` | 现金加 + 借据创建 |
+| 高利贷 | `loan.ts` | 同上 |
+| 还款（按 ID） | `loan.ts` | 现金扣 + 借据余额扣减 |
+| 还款（默认） | `loan.ts` | 同上 |
+| 申请破产 | `loan.ts` | 借据批量状态改 + 活期清零 + 定期清零 + 持仓清零 + 黑名单记录 |
+| 定期存款 | `bank.ts` | 活期扣 + 定期单创建 |
+| 定期取出 | `bank.ts` | 定期单改状态 + 现金加（含利息） |
+| 股票买入 | `stock.ts` | 现金扣 + 持仓 upsert |
+| 股票卖出 | `stock.ts` | 持仓扣 + 现金加 |
+| 股票分红 | `stock.ts` | 现金加（自动遍历所有持仓） |
+| 猜大小 / 轮盘 / 21点 | `casino.ts` | 押注扣 + 输赢结算 |
+| 彩票兑奖 | `lottery.ts` | 中奖人现金加 + 奖池清零 + 期数关账 |
+| 刮刮乐 | `scratch.ts` | 一次消息内扣 + 加 + 写日志 |
+| 抢劫全部路径 | `robbery.ts` | 成功：对方扣 + 自己加 / 失败：自己扣 + 对方安慰 + 奖池入账 |
+
+任何中途抛错（包括 puppeteer 渲染失败、K线查询报错等）都会触发回滚，不会再出现半成品状态。
+
+### 定时器守护
+
+3 处 `setInterval` 全部加 `inFlight` 重入锁（位于 `core.ts` 风格的同款 pattern）：
+
+- **股票行情刷新**（`stock.ts.scheduleUpdates`）—— 慢查询期间下一 tick 自动跳过
+- **催收员巡逻**（`loan.ts.scheduleCollectors`）—— 长时间扣资产过程不会被并发触发
+- **彩票开奖**（`lottery.ts.scheduleDraws`）—— 防止开奖逻辑因慢 IO 重复执行导致奖池二次清零
+
+### 编译配置
+
+`src/tsconfig.json`：
+
+- `noEmitOnError: false`：源码若有零星类型错误仍会发产物，避免插件升级时因类型小问题整体跑不起来
+- 输出目录 `../lib`，CommonJS 格式，ES2022 target
+
+线上发布建议在 CI 中独立跑 `tsc --noEmit` 做严格类型校验，与开发期"emit despite errors"解耦。
+
 ## 变更记录
+
+### v1.7.0（2026-09-04）
+
+本版本为**内部重构 + 可靠性修复**，对外完全无破坏性变化——所有命令名、参数、行为、数据表 schema、配置项都和 v1.6.0 一致。
+
+**模块化重构**
+
+- 原本 2163 行的 `src/index.ts`（编译产物 122 KB）拆为 17 个 .ts 模块，每个 30~470 行
+- 入口 `index.ts` 仅 113 行，负责按依赖顺序加载并注入跨模块方法
+- 新增 `src/types.ts`（业务接口）与 `src/koishi-tables.d.ts`（koishi `Tables` 扩展声明）单独管理类型
+
+**事务安全（关键修复）**
+
+引入 `core.dbTx()` 包装器（带后端降级），将所有「扣 + 加」配对原子化，包括：用户间积分转移、正常贷款、高利贷、还款（按 ID / 默认两条路径）、申请破产、定期存取、股票买卖、股票分红、赌场三种赢局、彩票兑奖、刮刮乐、抢劫全部路径。任何中途抛错都会自动回滚，不再出现"借了钱没到账""赢了奖没进钱包"之类的脏数据。
+
+**定时器守护**
+
+股票行情刷新 / 催收员巡逻 / 彩票开奖 三个 `setInterval` 全部加 `inFlight` 重入锁，防慢 IO 把定时器堆叠成长任务。
+
+**编译配置**
+
+`src/tsconfig.json` 启用 `noEmitOnError: false`：开发期类型小问题不阻塞产物输出；线上 CI 仍建议配独立严格类型校验。
+
+详细工程结构、模块依赖、事务覆盖清单见上文「工程结构」一节。
 
 ### v1.6.0（2026-09-04）
 

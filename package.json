@@ -1,6 +1,6 @@
 {
   "name": "koishi-plugin-daily-points",
-  "version": "1.6.0",
+  "version": "1.7.0",
   "description": "每日签到领取积分：支持连续签到递增奖励、积分排行、积分转移、管理员调整",
   "main": "lib/index.js",
   "typings": "lib/index.d.ts",
