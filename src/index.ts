@@ -1,4 +1,5 @@
 import { Context, Schema, h } from 'koishi'
+import { randomInt as cryptoRandomInt } from 'node:crypto'
 
 export const name = 'daily-points'
 export const inject = { required: ['database'], optional: ['puppeteer'] }
@@ -10,7 +11,7 @@ export const usage = `签到积分 + 银行 + 股票 + 贷款 + 娱乐 插件。
   银行：存款 / 取款 / 定期存款 / 定期列表 / 定期取出 / 银行（资产总览）
   贷款：贷款（正常） / 高利贷 / 还款（可指定ID） / 欠款 / 打工 / 破产
   股票：股票 / K线 / 买入 / 卖出 / 持仓
-  娱乐：赌场 / 猜大小 / 轮盘 / 21点 / 彩票 / 刮刮乐 / 抢劫
+  娱乐：赌场 / 猜大小 / 轮盘 / 21点 / 赌场战绩 / 彩票 / 刮刮乐 / 抢劫
 （旧写法「积分签到 / 我的积分 / 积分排行 / 积分转移」同样有效）`
 
 export interface Config {
@@ -52,11 +53,14 @@ export interface Config {
   dividendChance: number
   dividendRate: number
   casinoEnabled: boolean
-  casinoHouseEdge: number
+  casinoPoolContributionRate?: number
+  /** @deprecated 兼容旧配置，请改用 casinoPoolContributionRate。 */
+  casinoHouseEdge?: number
   casinoMinBet: number
   casinoMaxBet: number
   casinoCooldownSeconds: number
   blackjackStandOn: number
+  blackjackHitSoft17: boolean
   lotteryEnabled: boolean
   lotteryPrice: number
   lotteryDigits: number
@@ -131,11 +135,12 @@ export const Config: Schema<Config> = Schema.intersect([
   }).description('股票设置'),
   Schema.object({
     casinoEnabled: Schema.boolean().default(true).description('启用赌场'),
-    casinoHouseEdge: Schema.number().default(0.05).min(0).max(0.5).step(0.01).description('庄家抽水比例（输的钱按此比例入奖池）'),
+    casinoPoolContributionRate: Schema.number().min(0).max(0.5).step(0.01).description('输掉的押注按此比例计入赌场奖池（留空时兼容旧配置，默认 0.05）'),
     casinoMinBet: Schema.number().default(10).min(1).description('赌场单笔最低押注'),
     casinoMaxBet: Schema.number().default(5000).min(1).description('赌场单笔最高押注'),
     casinoCooldownSeconds: Schema.number().default(20).min(0).description('两次赌场下注的冷却（秒）'),
-    blackjackStandOn: Schema.number().default(17).min(15).max(20).description('21点庄家硬停牌点数'),
+    blackjackStandOn: Schema.number().default(17).min(15).max(20).description('21点庄家停牌点数'),
+    blackjackHitSoft17: Schema.boolean().default(false).description('21点庄家是否在软 17 点继续摸牌'),
   }).description('赌场设置'),
   Schema.object({
     lotteryEnabled: Schema.boolean().default(true).description('启用彩票'),
@@ -208,7 +213,9 @@ function dateKey(offsetHours: number, offsetDays = 0): string {
 
 function randomInt(min: number, max: number): number {
   if (max < min) max = min
-  return Math.floor(Math.random() * (max - min + 1)) + min
+  const lo = Math.ceil(min)
+  const hi = Math.floor(max)
+  return cryptoRandomInt(lo, hi + 1)
 }
 
 function fmtTime(ts: number): string {
@@ -382,6 +389,38 @@ export function apply(ctx: Context, config: Config) {
     primary: 'id',
   })
 
+  // 21点进行中的牌局；牌堆和双方手牌使用紧凑字符串持久化，重启后仍可继续
+  ctx.model.extend('daily_blackjack_sessions', {
+    userId: 'string(64)',
+    bet: 'unsigned',
+    playerCards: 'string(128)',
+    dealerCards: 'string(128)',
+    deck: 'string(512)',
+    createdAt: 'timestamp(3)',
+    updatedAt: 'timestamp(3)',
+  }, {
+    primary: 'userId',
+  })
+
+  // 赌场累计战绩（每个用户、每种游戏一行）
+  ctx.model.extend('daily_casino_stats', {
+    id: 'unsigned',
+    userId: 'string(64)',
+    game: 'string(16)',
+    plays: 'unsigned',
+    wins: 'unsigned',
+    losses: 'unsigned',
+    pushes: 'unsigned',
+    naturals: 'unsigned',
+    wagered: 'double',
+    net: 'double',
+    updatedAt: 'timestamp(3)',
+  }, {
+    primary: 'id',
+    autoInc: true,
+    unique: [['userId', 'game']],
+  })
+
   // 彩票期数
   ctx.model.extend('daily_lottery_periods', {
     id: 'unsigned',
@@ -451,6 +490,24 @@ export function apply(ctx: Context, config: Config) {
   })
 
   // ── 通用工具 ────────────────────────────────────────
+  // 同一用户的余额变更串行执行，避免快速重复指令造成读旧值、重复扣款或重复返奖。
+  const operationLocks = new Map<string, Promise<void>>()
+  async function withUserLock<T>(userId: string, task: () => Promise<T>): Promise<T> {
+    const lockKey = `user:${userId}`
+    const previous = operationLocks.get(lockKey) || Promise.resolve()
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    const tail = previous.then(() => gate)
+    operationLocks.set(lockKey, tail)
+    await previous
+    try {
+      return await task()
+    } finally {
+      release()
+      if (operationLocks.get(lockKey) === tail) operationLocks.delete(lockKey)
+    }
+  }
+
   async function getUser(userId: string, create = true): Promise<UserRow | null> {
     const [row] = await ctx.database.get('daily_points', { userId })
     if (row) return row
@@ -836,6 +893,57 @@ export function apply(ctx: Context, config: Config) {
   }
 
   // ── 娱乐引擎 ────────────────────────────────────────
+  /** 赌场奖池注入比例。新名称优先，旧 casinoHouseEdge 仅用于兼容已有配置。 */
+  function casinoPoolRate() {
+    const configured = config.casinoPoolContributionRate ?? config.casinoHouseEdge ?? 0.05
+    return Math.max(0, Math.min(0.5, Number(configured) || 0))
+  }
+
+  async function casinoCooldownLeft(userId: string) {
+    const cooldownMs = config.casinoCooldownSeconds * 1000
+    if (cooldownMs <= 0) return 0
+    const [last] = await ctx.database.get('daily_meta', { key: `casino:${userId}` })
+    if (!last) return 0
+    return Math.max(0, Math.ceil((Number(last.value) + cooldownMs - Date.now()) / 1000))
+  }
+
+  async function markCasinoPlay(userId: string) {
+    await ctx.database.upsert('daily_meta', [{ key: `casino:${userId}`, value: String(Date.now()) }])
+  }
+
+  type CasinoResult = 'win' | 'loss' | 'push' | 'natural' | 'surrender'
+  async function recordCasinoResult(userId: string, game: string, bet: number, net: number, result: CasinoResult) {
+    const [stats] = await ctx.database.get('daily_casino_stats', { userId, game })
+    const delta = {
+      plays: 1,
+      wins: result === 'win' || result === 'natural' ? 1 : 0,
+      losses: result === 'loss' || result === 'surrender' ? 1 : 0,
+      pushes: result === 'push' ? 1 : 0,
+      naturals: result === 'natural' ? 1 : 0,
+    }
+    if (!stats) {
+      await ctx.database.create('daily_casino_stats', {
+        userId,
+        game,
+        ...delta,
+        wagered: bet,
+        net,
+        updatedAt: new Date(),
+      })
+      return
+    }
+    await ctx.database.set('daily_casino_stats', { id: stats.id }, {
+      plays: stats.plays + 1,
+      wins: stats.wins + delta.wins,
+      losses: stats.losses + delta.losses,
+      pushes: stats.pushes + delta.pushes,
+      naturals: stats.naturals + delta.naturals,
+      wagered: stats.wagered + bet,
+      net: stats.net + net,
+      updatedAt: new Date(),
+    })
+  }
+
   /** 获取赌场奖池（单行 id=1，不存在则初始化为 0） */
   async function getCasinoPool() {
     const [row] = await ctx.database.get('daily_casino_pool', { id: 1 })
@@ -845,15 +953,13 @@ export function apply(ctx: Context, config: Config) {
     return created
   }
   async function feedCasinoPool(delta: number) {
-    const pool = await getCasinoPool()
-    const next = Math.round((pool.amount + delta) * 100) / 100
-    await ctx.database.set('daily_casino_pool', { id: 1 }, { amount: next, updatedAt: new Date() })
-    return next
-  }
-  async function drainCasinoPool() {
-    const pool = await getCasinoPool()
-    await ctx.database.set('daily_casino_pool', { id: 1 }, { amount: 0, updatedAt: new Date() })
-    return pool.amount
+    if (delta <= 0) return (await getCasinoPool()).amount
+    return withUserLock('$casino-pool', async () => {
+      const pool = await getCasinoPool()
+      const next = Math.round((pool.amount + delta) * 100) / 100
+      await ctx.database.set('daily_casino_pool', { id: 1 }, { amount: next, updatedAt: new Date() })
+      return next
+    })
   }
   async function ensureLotteryPeriod() {
     try {
@@ -962,29 +1068,173 @@ export function apply(ctx: Context, config: Config) {
     await ctx.database.remove('daily_jail', { userId })
     return 0
   }
-  function bjScore(hand: { rank: string }[]) {
+  type BjSuit = 'S' | 'H' | 'D' | 'C'
+  interface BjCard { rank: string; suit: BjSuit }
+
+  function bjScoreDetail(hand: BjCard[]) {
     let total = 0, aces = 0
     for (const c of hand) {
       if (c.rank === 'A') { aces += 1; total += 1 }
       else if (['J', 'Q', 'K'].includes(c.rank)) total += 10
       else total += Number(c.rank)
     }
-    while (aces > 0 && total + 10 <= 21) { total += 10; aces -= 1 }
-    return total
+    let soft = false
+    if (aces > 0 && total + 10 <= 21) {
+      total += 10
+      soft = true
+    }
+    return { score: total, soft }
   }
-  function bjNewDeck() {
+
+  function bjScore(hand: BjCard[]) {
+    return bjScoreDetail(hand).score
+  }
+
+  function bjNatural(hand: BjCard[]) {
+    return hand.length === 2 && bjScore(hand) === 21
+  }
+
+  function bjNewDeck(): BjCard[] {
     const ranks = ['A', '2', '3', '4', '5', '6', '7', '8', '9', '10', 'J', 'Q', 'K']
-    const deck: { rank: string }[] = []
-    for (const r of ranks) for (let i = 0; i < 4; i++) deck.push({ rank: r })
+    const suits: BjSuit[] = ['S', 'H', 'D', 'C']
+    const deck: BjCard[] = []
+    for (const suit of suits) for (const rank of ranks) deck.push({ rank, suit })
     for (let i = deck.length - 1; i > 0; i--) {
-      const j = Math.floor(Math.random() * (i + 1));
-      [deck[i], deck[j]] = [deck[j], deck[i]]
+      const j = randomInt(0, i)
+      ;[deck[i], deck[j]] = [deck[j], deck[i]]
     }
     return deck
   }
-  function bjCardStr(c: { rank: string }) {
-    const suit = ['♠', '♥', '♦', '♣'][Math.floor(Math.random() * 4)]
-    return `${suit}${c.rank}`
+
+  function bjCardStr(c: BjCard) {
+    const suits: Record<BjSuit, string> = { S: '♠', H: '♥', D: '♦', C: '♣' }
+    return `${suits[c.suit]}${c.rank}`
+  }
+
+  function bjEncode(cards: BjCard[]) {
+    return cards.map((c) => `${c.rank}${c.suit}`).join(',')
+  }
+
+  function bjDecode(value: string): BjCard[] {
+    if (!value) return []
+    return value.split(',').filter(Boolean).map((code) => ({
+      rank: code.slice(0, -1),
+      suit: code.slice(-1) as BjSuit,
+    }))
+  }
+
+  function bjPlayerText(cards: BjCard[]) {
+    return cards.map((c, index) => index === 1 ? `[暗牌 ${bjCardStr(c)}]` : bjCardStr(c)).join(' ')
+  }
+
+  function bjDealerText(cards: BjCard[], reveal = false) {
+    if (reveal) return cards.map(bjCardStr).join(' ')
+    return `${cards[0] ? bjCardStr(cards[0]) : '无'} [暗牌 🎴]`
+  }
+
+  function bjDealerDraw(deck: BjCard[], hand: BjCard[]) {
+    while (deck.length) {
+      const detail = bjScoreDetail(hand)
+      const hitSoft17 = config.blackjackHitSoft17 && detail.soft && detail.score === 17
+      if (detail.score >= config.blackjackStandOn && !hitSoft17) break
+      hand.push(deck.pop()!)
+    }
+  }
+
+  async function getBlackjackRound(userId: string) {
+    const [round] = await ctx.database.get('daily_blackjack_sessions', { userId })
+    return round || null
+  }
+
+  async function saveBlackjackRound(userId: string, bet: number, player: BjCard[], dealer: BjCard[], deck: BjCard[], create = false) {
+    const data = {
+      userId,
+      bet,
+      playerCards: bjEncode(player),
+      dealerCards: bjEncode(dealer),
+      deck: bjEncode(deck),
+      updatedAt: new Date(),
+    }
+    if (create) {
+      await ctx.database.create('daily_blackjack_sessions', { ...data, createdAt: new Date() })
+    } else {
+      await ctx.database.set('daily_blackjack_sessions', { userId }, data)
+    }
+  }
+
+  function blackjackPrompt(player: BjCard[], dealer: BjCard[], bet: number) {
+    return [
+      `♠️ 你的牌：${bjPlayerText(player)}（${bjScore(player)} 点）`,
+      `♣️ 庄家：${bjDealerText(dealer)}（明牌 ${dealer[0] ? bjScore([dealer[0]]) : 0} 点）`,
+      `当前押注：${bet}。请选择「摸牌」「加注 金额」「开牌」或「放弃」。`,
+    ].join('\n')
+  }
+
+  async function settleBlackjackRound(userId: string, round: any, forced?: 'surrender') {
+    const player = bjDecode(round.playerCards)
+    const dealer = bjDecode(round.dealerCards)
+    const deck = bjDecode(round.deck)
+    const bet = Number(round.bet)
+    const playerNatural = bjNatural(player)
+    const dealerNatural = bjNatural(dealer)
+    let result: CasinoResult
+    let payout = 0
+    let message = ''
+
+    if (forced === 'surrender') {
+      result = 'surrender'
+      payout = Math.floor(bet / 2)
+      message = `🏳️ 你选择放弃，返还一半押注 ${payout}。`
+    } else if (playerNatural || dealerNatural) {
+      if (playerNatural && dealerNatural) {
+        result = 'push'
+        payout = bet
+        message = '🤝 双方都是天然 21 点，平局退还本金。'
+      } else if (playerNatural) {
+        result = 'natural'
+        payout = bet + Math.floor(bet * 1.5)
+        message = `✨ 天然 21 点！按 3:2 获利，返还 ${payout}（含本金）。`
+      } else {
+        result = 'loss'
+        message = '❌ 庄家天然 21 点，本局失败。'
+      }
+    } else if (bjScore(player) > 21) {
+      result = 'loss'
+      message = '💥 你爆牌了，本局失败。'
+    } else {
+      bjDealerDraw(deck, dealer)
+      const playerScore = bjScore(player)
+      const dealerScore = bjScore(dealer)
+      if (dealerScore > 21 || playerScore > dealerScore) {
+        result = 'win'
+        payout = bet * 2
+        message = dealerScore > 21 ? '✅ 庄家爆牌，你赢了！' : `✅ ${playerScore} vs ${dealerScore}，你赢了！`
+      } else if (playerScore === dealerScore) {
+        result = 'push'
+        payout = bet
+        message = `🤝 ${playerScore} vs ${dealerScore}，平局退还本金。`
+      } else {
+        result = 'loss'
+        message = `❌ ${playerScore} vs ${dealerScore}，庄家获胜。`
+      }
+    }
+
+    const row = await getUser(userId)
+    await ctx.database.set('daily_points', { userId }, { points: row.points + payout })
+    const lost = Math.max(0, bet - payout)
+    const poolFee = Math.floor(lost * casinoPoolRate())
+    const pool = poolFee > 0 ? await feedCasinoPool(poolFee) : null
+    await recordCasinoResult(userId, 'blackjack', bet, payout - bet, result)
+    await ctx.database.remove('daily_blackjack_sessions', { userId })
+
+    const lines = [
+      `♠️ 你的牌：${player.map(bjCardStr).join(' ')}（${bjScore(player)} 点）`,
+      `♣️ 庄家牌：${dealer.map(bjCardStr).join(' ')}（${bjScore(dealer)} 点）`,
+      message,
+    ]
+    if (poolFee > 0) lines.push(`其中 ${poolFee} 计入赌场奖池（奖池 ${fmtMoney(pool!)}）。`)
+    lines.push(`本局净收益：${payout - bet >= 0 ? '+' : ''}${payout - bet}，当前现金：${row.points + payout}`)
+    return lines.join('\n')
   }
   if (config.loanEnabled) {
     runCollectors().catch((e) => logger.warn('启动催收失败：', e))
@@ -1006,6 +1256,7 @@ export function apply(ctx: Context, config: Config) {
     '存款', '取款', '定期存款', '定期取出',
     '贷款', '正常贷款', '高利贷', '还款', '还贷',
     '猜大小', '赌大小', '轮盘', '赌轮盘', '轮盘赌', '21点', '二十一点', '黑杰克',
+    '加注',
     '彩票', '买彩票', '刮刮乐', '刮奖', 'ggl',
     'K线', 'k线', '蜡烛图', '走势图', '买入', '卖出',
   ])
@@ -1811,10 +2062,10 @@ export function apply(ctx: Context, config: Config) {
       const lastDraw = await ctx.database.get('daily_lottery_periods', { status: 'drawn' }, { sort: { period: 'desc' }, limit: 1 })
       const lines = [
         '🎲 娱乐指令（刺激型玩家专享）：',
-        '  赌场 —— 猜大小 / 轮盘 / 21点，庄家抽水 5%，输了的钱进奖池',
-        '  彩票 —— 每期 10 积分一注，头奖独得奖池，未中滚入下期',
+        `  赌场 —— 猜大小 / 轮盘 / 21点，输局的 ${(casinoPoolRate() * 100).toFixed(0)}% 计入奖池`,
+        `  彩票 —— 每期 ${config.lotteryPrice} 积分一注，头奖独得奖池，未中滚入下期`,
         '  刮刮乐 —— 即买即开，小奖概率高、大奖概率极低',
-        '  抢劫 @某人 —— 抢别人现金，成功拿 30%，失败赔 50%（有冷却+坐牢）',
+        `  抢劫 @某人 —— 成功拿 ${(config.robberySuccessPct * 100).toFixed(0)}%，失败赔 ${(config.robberyFailPct * 100).toFixed(0)}%（有冷却+坐牢）`,
         '',
         `💰 当前赌场奖池：${fmtMoney(pool.amount)}`,
         `🎰 彩票当前第 ${cur.period} 期，已累计 ${cur.ticketCount} 注`,
@@ -1830,61 +2081,75 @@ export function apply(ctx: Context, config: Config) {
     .action(() => {
       return [
         '🎰 赌场规则一览：',
-        '  猜大小 押注 大|小 —— 两个骰子，2-6 为小、8-12 为大；7 点庄家通吃',
+        '  猜大小 押注 大|小 —— 三枚骰子，4-10 为小、11-17 为大；任意豹子庄家通吃',
         '  轮盘 押注 红|黑|单|双 —— 0-36 中随机一格，按红黑/单双赔率结算',
-        '  21点 押注 —— 玩家和庄家各两张起手，按硬规则补到 ≥17，比点数',
+        '  21点 押注 —— 开始交互牌局；随后发送「摸牌 / 加注 金额 / 开牌 / 放弃」',
+        '  赌场战绩 —— 查看累计局数、胜负和净收益',
         '',
-        `通用规则：单笔 ${config.casinoMinBet} ~ ${config.casinoMaxBet} 积分，押注间隔 ${config.casinoCooldownSeconds} 秒；赢了 1:1 赔付（含本金），输了按 ${(config.casinoHouseEdge * 100).toFixed(0)}% 抽水入奖池。`,
+        `通用规则：单笔 ${config.casinoMinBet} ~ ${config.casinoMaxBet} 积分，开新局间隔 ${config.casinoCooldownSeconds} 秒；普通胜局 1:1，输掉金额的 ${(casinoPoolRate() * 100).toFixed(0)}% 计入奖池。`,
       ].join('\n')
     })
 
-  ctx.command('经济/娱乐/赌场/猜大小 <amount:string> <choice:string>', '两个骰子猜大小（7 点庄家通吃）')
+  ctx.command('经济/娱乐/赌场/战绩', '查看我的赌场累计战绩')
+    .alias('赌场战绩', '赌局统计')
+    .action(async ({ session }) => {
+      if (!session.userId) return
+      const key = `${session.platform}:${session.userId}`
+      const stats = await ctx.database.get('daily_casino_stats', { userId: key })
+      if (!stats.length) return '还没有赌场战绩，发送「赌场」看看玩法吧。'
+      const names: Record<string, string> = { bigsmall: '🎲 猜大小', roulette: '🎡 轮盘', blackjack: '♠️ 21点' }
+      let plays = 0, wagered = 0, net = 0
+      const lines = stats.map((s) => {
+        plays += s.plays
+        wagered += s.wagered
+        net += s.net
+        const natural = s.naturals ? `｜天然21点 ${s.naturals}` : ''
+        return `${names[s.game] || s.game}｜${s.plays} 局｜胜 ${s.wins} 负 ${s.losses} 和 ${s.pushes}${natural}｜累计下注 ${fmtMoney(s.wagered)}｜净收益 ${s.net >= 0 ? '+' : ''}${fmtMoney(s.net)}`
+      })
+      return [`📊 我的赌场战绩：`, ...lines, `合计 ${plays} 局，累计下注 ${fmtMoney(wagered)}，总净收益 ${net >= 0 ? '+' : ''}${fmtMoney(net)}`].join('\n')
+    })
+
+  ctx.command('经济/娱乐/赌场/猜大小 <amount:string> <choice:string>', '三枚骰子猜大小（豹子庄家通吃）')
     .alias('赌大小', '大小', 'ducai', 'casino-bigsmall')
     .action(async ({ session }, amount, choice) => {
       if (!session.userId) return
       if (!config.casinoEnabled) return '赌场系统未开启。'
       const key = `${session.platform}:${session.userId}`
-      const choiceMap: Record<string, string> = { '大': 'big', '小': 'small', big: 'big', small: 'small', BIG: 'big', SMALL: 'small' }
-      let pickEn: string | null = null
-      if (choiceMap[choice]) pickEn = choiceMap[choice]
-      else if (choice.includes('大')) pickEn = 'big'
-      else if (choice.includes('小')) pickEn = 'small'
-      if (!pickEn) return '请输入「大」或「小」，例如「猜大小 100 大」。'
-      const row = await getUser(key)
-      const n = parseAmount(amount, row.points)
-      if (n === null) return '请输入正确的金额（正整数）。'
-      if (n < config.casinoMinBet) return `单笔最低 ${config.casinoMinBet}。`
-      if (n > config.casinoMaxBet) return `单笔最高 ${config.casinoMaxBet}。`
-      if (n > row.points) return `现金不足（当前 ${row.points}）。`
-      const cooldownMs = config.casinoCooldownSeconds * 1000
-      const lastCasino = await ctx.database.get('daily_meta', { key: `casino:${key}` })
-      if (lastCasino.length && Date.now() - Number(lastCasino[0].value) < cooldownMs) {
-        const left = Math.ceil((Number(lastCasino[0].value) + cooldownMs - Date.now()) / 1000)
-        return `🎰 荷官说歇会儿：${left} 秒后再下注。`
-      }
-      await ctx.database.upsert('daily_meta', [{ key: `casino:${key}`, value: String(Date.now()) }])
-      await ctx.database.set('daily_points', { userId: key }, { points: row.points - n })
-      const d1 = randomInt(1, 6), d2 = randomInt(1, 6)
-      const sum = d1 + d2
-      let result: { win: boolean, reason?: string, label?: string }
-      if (sum === 7) result = { win: false, reason: '7 点庄家通吃' }
-      else if (sum >= 8) result = { win: pickEn === 'big', label: '大' }
-      else result = { win: pickEn === 'small', label: '小' }
-      if (result.win) {
-        const payout = n * 2
-        await ctx.database.set('daily_points', { userId: key }, { points: row.points - n + payout })
+      return withUserLock(key, async () => {
+        const rawChoice = String(choice || '').trim().toLowerCase()
+        const pick = rawChoice.includes('大') || rawChoice === 'big' ? 'big'
+          : rawChoice.includes('小') || rawChoice === 'small' ? 'small' : null
+        if (!pick) return '请输入「大」或「小」，例如「猜大小 100 大」。'
+        const row = await getUser(key)
+        const n = parseAmount(amount, row.points)
+        if (n === null) return '请输入正确的金额（正整数）。'
+        if (n < config.casinoMinBet) return `单笔最低 ${config.casinoMinBet}。`
+        if (n > config.casinoMaxBet) return `单笔最高 ${config.casinoMaxBet}。`
+        if (n > row.points) return `现金不足（当前 ${row.points}）。`
+        const cooldown = await casinoCooldownLeft(key)
+        if (cooldown > 0) return `🎰 荷官说歇会儿：${cooldown} 秒后再下注。`
+        await markCasinoPlay(key)
+        await ctx.database.set('daily_points', { userId: key }, { points: row.points - n })
+        const dice = [randomInt(1, 6), randomInt(1, 6), randomInt(1, 6)]
+        const sum = dice.reduce((a, b) => a + b, 0)
+        const triple = dice[0] === dice[1] && dice[1] === dice[2]
+        const label = sum <= 10 ? '小' : '大'
+        const win = !triple && ((pick === 'big' && sum >= 11) || (pick === 'small' && sum <= 10))
+        if (win) {
+          const payout = n * 2
+          await ctx.database.set('daily_points', { userId: key }, { points: row.points - n + payout })
+          await recordCasinoResult(key, 'bigsmall', n, n, 'win')
+          return [`🎲 骰子：${dice.join(' + ')} = ${sum}（${label}）`, `✅ 命中！返还 ${payout}（含本金），本局净赚 ${n}，现金：${row.points + n}`].join('\n')
+        }
+        const poolFee = Math.floor(n * casinoPoolRate())
+        const newPool = await feedCasinoPool(poolFee)
+        await recordCasinoResult(key, 'bigsmall', n, -n, 'loss')
         return [
-          `🎲 骰子：${d1} + ${d2} = ${sum}（${result.label}）`,
-          `✅ 命中！赔付 1:1，到手 ${payout}（含本金 ${n}），现金：${row.points - n + payout}`,
+          `🎲 骰子：${dice.join(' + ')} = ${sum}${triple ? `（豹子 ${dice[0]}-${dice[1]}-${dice[2]}，庄家通吃）` : `（${label}）`}`,
+          `❌ 没中，输掉 ${n}，其中 ${poolFee} 计入赌场奖池（奖池 ${fmtMoney(newPool)}）`,
+          `当前现金：${row.points - n}`,
         ].join('\n')
-      }
-      const poolFee = Math.floor(n * config.casinoHouseEdge)
-      const newPool = await feedCasinoPool(poolFee)
-      return [
-        `🎲 骰子：${d1} + ${d2} = ${sum}${result.reason ? `（${result.reason}）` : `（${pickEn === 'big' ? '小' : '大'}）`}`,
-        `❌ 没中，输掉 ${n}，其中 ${poolFee} 入赌场奖池（奖池 ${fmtMoney(newPool)}）`,
-        `当前现金：${row.points - n}`,
-      ].join('\n')
+      })
     })
 
   ctx.command('经济/娱乐/赌场/轮盘 <amount:string> <choice:string>', '轮盘：红/黑/单/双，1:1 赔率')
@@ -1893,120 +2158,156 @@ export function apply(ctx: Context, config: Config) {
       if (!session.userId) return
       if (!config.casinoEnabled) return '赌场系统未开启。'
       const key = `${session.platform}:${session.userId}`
-      let pickEn: string | null = null
-      if (choice === '红' || choice.includes('红')) pickEn = 'red'
-      else if (choice === '黑' || choice.includes('黑')) pickEn = 'black'
-      else if (choice === '单' || choice.includes('单')) pickEn = 'odd'
-      else if (choice === '双' || choice.includes('双')) pickEn = 'even'
-      if (!pickEn) return '请输入「红」「黑」「单」或「双」，例如「轮盘 100 红」。'
-      const row = await getUser(key)
-      const n = parseAmount(amount, row.points)
-      if (n === null) return '请输入正确的金额（正整数）。'
-      if (n < config.casinoMinBet) return `单笔最低 ${config.casinoMinBet}。`
-      if (n > config.casinoMaxBet) return `单笔最高 ${config.casinoMaxBet}。`
-      if (n > row.points) return `现金不足（当前 ${row.points}）。`
-      const cooldownMs = config.casinoCooldownSeconds * 1000
-      const lastCasino = await ctx.database.get('daily_meta', { key: `casino:${key}` })
-      if (lastCasino.length && Date.now() - Number(lastCasino[0].value) < cooldownMs) {
-        const left = Math.ceil((Number(lastCasino[0].value) + cooldownMs - Date.now()) / 1000)
-        return `🎰 荷官说歇会儿：${left} 秒后再下注。`
-      }
-      await ctx.database.upsert('daily_meta', [{ key: `casino:${key}`, value: String(Date.now()) }])
-      await ctx.database.set('daily_points', { userId: key }, { points: row.points - n })
-      const ball = randomInt(0, 36)
-      const isRed = [1, 3, 5, 7, 9, 12, 14, 16, 18, 19, 21, 23, 25, 27, 30, 32, 34, 36].includes(ball)
-      const isBlack = ball !== 0 && !isRed
-      const isOdd = ball % 2 === 1 && ball !== 0
-      const isEven = ball % 2 === 0 && ball !== 0
-      let win = false
-      if (pickEn === 'red' && isRed) win = true
-      if (pickEn === 'black' && isBlack) win = true
-      if (pickEn === 'odd' && isOdd) win = true
-      if (pickEn === 'even' && isEven) win = true
-      const colorLabel = ball === 0 ? '绿(0)' : (isRed ? '红' : '黑')
-      const choiceLabel = pickEn === 'red' ? '红' : pickEn === 'black' ? '黑' : pickEn === 'odd' ? '单' : '双'
-      if (win) {
-        const payout = n * 2
-        await ctx.database.set('daily_points', { userId: key }, { points: row.points - n + payout })
+      return withUserLock(key, async () => {
+        const rawChoice = String(choice || '').trim()
+        let pickEn: string | null = null
+        if (rawChoice === '红' || rawChoice.includes('红')) pickEn = 'red'
+        else if (rawChoice === '黑' || rawChoice.includes('黑')) pickEn = 'black'
+        else if (rawChoice === '单' || rawChoice.includes('单')) pickEn = 'odd'
+        else if (rawChoice === '双' || rawChoice.includes('双')) pickEn = 'even'
+        if (!pickEn) return '请输入「红」「黑」「单」或「双」，例如「轮盘 100 红」。'
+        const row = await getUser(key)
+        const n = parseAmount(amount, row.points)
+        if (n === null) return '请输入正确的金额（正整数）。'
+        if (n < config.casinoMinBet) return `单笔最低 ${config.casinoMinBet}。`
+        if (n > config.casinoMaxBet) return `单笔最高 ${config.casinoMaxBet}。`
+        if (n > row.points) return `现金不足（当前 ${row.points}）。`
+        const cooldown = await casinoCooldownLeft(key)
+        if (cooldown > 0) return `🎰 荷官说歇会儿：${cooldown} 秒后再下注。`
+        await markCasinoPlay(key)
+        await ctx.database.set('daily_points', { userId: key }, { points: row.points - n })
+        const ball = randomInt(0, 36)
+        const isRed = [1, 3, 5, 7, 9, 12, 14, 16, 18, 19, 21, 23, 25, 27, 30, 32, 34, 36].includes(ball)
+        const isBlack = ball !== 0 && !isRed
+        const isOdd = ball % 2 === 1 && ball !== 0
+        const isEven = ball % 2 === 0 && ball !== 0
+        const win = (pickEn === 'red' && isRed) || (pickEn === 'black' && isBlack) || (pickEn === 'odd' && isOdd) || (pickEn === 'even' && isEven)
+        const colorLabel = ball === 0 ? '绿(0)' : (isRed ? '红' : '黑')
+        const choiceLabel = pickEn === 'red' ? '红' : pickEn === 'black' ? '黑' : pickEn === 'odd' ? '单' : '双'
+        if (win) {
+          const payout = n * 2
+          await ctx.database.set('daily_points', { userId: key }, { points: row.points - n + payout })
+          await recordCasinoResult(key, 'roulette', n, n, 'win')
+          return [`🎡 轮盘球落 ${ball}（${colorLabel}）`, `✅ 命中「${choiceLabel}」！返还 ${payout}（含本金），现金：${row.points + n}`].join('\n')
+        }
+        const poolFee = Math.floor(n * casinoPoolRate())
+        const newPool = await feedCasinoPool(poolFee)
+        await recordCasinoResult(key, 'roulette', n, -n, 'loss')
         return [
           `🎡 轮盘球落 ${ball}（${colorLabel}）`,
-          `✅ 命中「${choiceLabel}」！赔付 1:1，到手 ${payout}（含本金），现金：${row.points - n + payout}`,
+          `❌ ${ball === 0 ? '球落 0，庄家通吃' : `没中「${choiceLabel}」`}，输掉 ${n}，其中 ${poolFee} 计入赌场奖池（奖池 ${fmtMoney(newPool)}）`,
+          `当前现金：${row.points - n}`,
         ].join('\n')
-      }
-      const poolFee = Math.floor(n * config.casinoHouseEdge)
-      const newPool = await feedCasinoPool(poolFee)
-      return [
-        `🎡 轮盘球落 ${ball}（${colorLabel}）`,
-        ball === 0 ? `❌ 球落 0，所有押注通吃` : `❌ 没中「${choiceLabel}」，输掉 ${n}，其中 ${poolFee} 入赌场奖池（奖池 ${fmtMoney(newPool)}）`,
-        `当前现金：${row.points - n}`,
-      ].join('\n')
+      })
     })
 
-  ctx.command('经济/娱乐/赌场/21点 <amount:string>', '21点：玩家和庄家按硬规则自动比大小')
+  ctx.command('经济/娱乐/赌场/21点 <amount:string>', '开始或查看一局21点（交互玩法）')
     .alias('黑杰克', '二十一点', 'blackjack')
     .action(async ({ session }, amount) => {
       if (!session.userId) return
       if (!config.casinoEnabled) return '赌场系统未开启。'
       const key = `${session.platform}:${session.userId}`
-      const row = await getUser(key)
-      const n = parseAmount(amount, row.points)
-      if (n === null) return '请输入正确的金额（正整数）。'
-      if (n < config.casinoMinBet) return `单笔最低 ${config.casinoMinBet}。`
-      if (n > config.casinoMaxBet) return `单笔最高 ${config.casinoMaxBet}。`
-      if (n > row.points) return `现金不足（当前 ${row.points}）。`
-      const cooldownMs = config.casinoCooldownSeconds * 1000
-      const lastCasino = await ctx.database.get('daily_meta', { key: `casino:${key}` })
-      if (lastCasino.length && Date.now() - Number(lastCasino[0].value) < cooldownMs) {
-        const left = Math.ceil((Number(lastCasino[0].value) + cooldownMs - Date.now()) / 1000)
-        return `🎰 荷官说歇会儿：${left} 秒后再下注。`
-      }
-      await ctx.database.upsert('daily_meta', [{ key: `casino:${key}`, value: String(Date.now()) }])
-      await ctx.database.set('daily_points', { userId: key }, { points: row.points - n })
-      const deck = bjNewDeck()
-      let pHand: { rank: string }[] = [deck.pop()!, deck.pop()!]
-      let dHand: { rank: string }[] = [deck.pop()!, deck.pop()!]
-      while (bjScore(pHand) < 17) pHand.push(deck.pop()!)
-      while (bjScore(dHand) < config.blackjackStandOn) dHand.push(deck.pop()!)
-      const pScore = bjScore(pHand)
-      const dScore = bjScore(dHand)
-      const pStr = pHand.map(bjCardStr).join(' ')
-      const dStr = dHand.map(bjCardStr).join(' ')
-      const pBust = pScore > 21, dBust = dScore > 21
-      const lines = [
-        `♠️ 你的手牌：${pStr}（${pScore}${pBust ? ' 爆牌' : ''}）`,
-        `♣️ 庄家手牌：${dStr}（${dScore}${dBust ? ' 爆牌' : ''}）`,
-      ]
-      if (pBust && dBust) {
-        const poolFee = Math.floor(n * config.casinoHouseEdge)
-        const newPool = await feedCasinoPool(poolFee)
-        lines.push(`💥 双爆，按惯例算庄家赢，输掉 ${n}（其中 ${poolFee} 入奖池 ${fmtMoney(newPool)}）`)
-        lines.push(`当前现金：${row.points - n}`)
-        return lines.join('\n')
-      }
-      if (pBust) {
-        const poolFee = Math.floor(n * config.casinoHouseEdge)
-        const newPool = await feedCasinoPool(poolFee)
-        lines.push(`❌ 爆牌，输掉 ${n}（其中 ${poolFee} 入奖池 ${fmtMoney(newPool)}）`)
-        lines.push(`当前现金：${row.points - n}`)
-        return lines.join('\n')
-      }
-      if (dBust) {
-        const payout = n * 2
-        await ctx.database.set('daily_points', { userId: key }, { points: row.points - n + payout })
-        lines.push(`✅ 庄家爆牌！赔付 1:1，到手 ${payout}，现金：${row.points - n + payout}`)
-        return lines.join('\n')
-      }
-      if (pScore > dScore) {
-        const payout = n * 2
-        await ctx.database.set('daily_points', { userId: key }, { points: row.points - n + payout })
-        lines.push(`✅ ${pScore} vs ${dScore}，点数大，赔付 1:1，到手 ${payout}，现金：${row.points - n + payout}`)
-        return lines.join('\n')
-      }
-      const poolFee = Math.floor(n * config.casinoHouseEdge)
-      const newPool = await feedCasinoPool(poolFee)
-      lines.push(`❌ ${pScore} vs ${dScore}，点数小或平，输掉 ${n}（其中 ${poolFee} 入奖池 ${fmtMoney(newPool)}）`)
-      lines.push(`当前现金：${row.points - n}`)
-      return lines.join('\n')
+      return withUserLock(key, async () => {
+        const active = await getBlackjackRound(key)
+        if (active) {
+          const player = bjDecode(active.playerCards)
+          const dealer = bjDecode(active.dealerCards)
+          return `你已有一局未结束的21点。\n${blackjackPrompt(player, dealer, active.bet)}`
+        }
+        if (!amount) return '请先下注开局，例如「21点 100」。'
+        const row = await getUser(key)
+        const n = parseAmount(amount, row.points)
+        if (n === null) return '请输入正确的金额（正整数）。'
+        if (n < config.casinoMinBet) return `单笔最低 ${config.casinoMinBet}。`
+        if (n > config.casinoMaxBet) return `单局累计押注最高 ${config.casinoMaxBet}。`
+        if (n > row.points) return `现金不足（当前 ${row.points}）。`
+        const cooldown = await casinoCooldownLeft(key)
+        if (cooldown > 0) return `🎰 荷官说歇会儿：${cooldown} 秒后再开新局。`
+        const deck = bjNewDeck()
+        const player = [deck.pop()!, deck.pop()!]
+        const dealer = [deck.pop()!, deck.pop()!]
+        await markCasinoPlay(key)
+        await ctx.database.set('daily_points', { userId: key }, { points: row.points - n })
+        await saveBlackjackRound(key, n, player, dealer, deck, true)
+        const round = { bet: n, playerCards: bjEncode(player), dealerCards: bjEncode(dealer), deck: bjEncode(deck) }
+        if (bjNatural(player) || bjNatural(dealer)) return settleBlackjackRound(key, round)
+        return [`♠️ 21点开局，已扣除押注 ${n}。`, blackjackPrompt(player, dealer, n)].join('\n')
+      })
+    })
+
+  ctx.command('经济/娱乐/赌场/21点/摸牌', '21点继续摸一张牌')
+    .alias('摸牌', '要牌', 'hit')
+    .action(async ({ session }) => {
+      if (!session.userId) return
+      if (!config.casinoEnabled) return '赌场系统未开启。'
+      const key = `${session.platform}:${session.userId}`
+      return withUserLock(key, async () => {
+        const round = await getBlackjackRound(key)
+        if (!round) return '你没有进行中的21点牌局，先发送「21点 金额」开局。'
+        const player = bjDecode(round.playerCards)
+        const dealer = bjDecode(round.dealerCards)
+        const deck = bjDecode(round.deck)
+        const card = deck.pop()
+        if (!card) return '牌堆异常，请发送「放弃」结束本局。'
+        player.push(card)
+        await saveBlackjackRound(key, round.bet, player, dealer, deck)
+        if (bjScore(player) >= 21) {
+          const fresh = await getBlackjackRound(key)
+          return settleBlackjackRound(key, fresh)
+        }
+        return [`你摸到 ${bjCardStr(card)}。`, blackjackPrompt(player, dealer, round.bet)].join('\n')
+      })
+    })
+
+  ctx.command('经济/娱乐/赌场/21点/加注 <amount:string>', '为当前21点牌局追加押注')
+    .alias('加注', 'raise')
+    .action(async ({ session }, amount) => {
+      if (!session.userId) return
+      if (!config.casinoEnabled) return '赌场系统未开启。'
+      const key = `${session.platform}:${session.userId}`
+      return withUserLock(key, async () => {
+        const round = await getBlackjackRound(key)
+        if (!round) return '你没有进行中的21点牌局，先发送「21点 金额」开局。'
+        const row = await getUser(key)
+        const room = config.casinoMaxBet - round.bet
+        if (room <= 0) return `本局累计押注已达到上限 ${config.casinoMaxBet}。`
+        const n = parseAmount(amount, Math.min(row.points, room))
+        if (n === null || n <= 0) return '请输入正确的加注金额（正整数或「全部」）。'
+        if (n > row.points) return `现金不足（当前 ${row.points}）。`
+        if (n > room) return `本局累计押注最高 ${config.casinoMaxBet}，当前还能加注 ${Math.max(0, room)}。`
+        await ctx.database.set('daily_points', { userId: key }, { points: row.points - n })
+        const player = bjDecode(round.playerCards)
+        const dealer = bjDecode(round.dealerCards)
+        const deck = bjDecode(round.deck)
+        await saveBlackjackRound(key, round.bet + n, player, dealer, deck)
+        return [`已加注 ${n}，本局累计押注 ${round.bet + n}，现金剩余 ${row.points - n}。`, blackjackPrompt(player, dealer, round.bet + n)].join('\n')
+      })
+    })
+
+  ctx.command('经济/娱乐/赌场/21点/开牌', '停止摸牌并与庄家结算')
+    .alias('开牌', '展示牌', '停牌', 'stand')
+    .action(async ({ session }) => {
+      if (!session.userId) return
+      if (!config.casinoEnabled) return '赌场系统未开启。'
+      const key = `${session.platform}:${session.userId}`
+      return withUserLock(key, async () => {
+        const round = await getBlackjackRound(key)
+        if (!round) return '你没有进行中的21点牌局。'
+        return settleBlackjackRound(key, round)
+      })
+    })
+
+  ctx.command('经济/娱乐/赌场/21点/放弃', '放弃当前牌局并返还一半押注')
+    .alias('放弃', '认输', 'surrender')
+    .action(async ({ session }) => {
+      if (!session.userId) return
+      if (!config.casinoEnabled) return '赌场系统未开启。'
+      const key = `${session.platform}:${session.userId}`
+      return withUserLock(key, async () => {
+        const round = await getBlackjackRound(key)
+        if (!round) return '你没有进行中的21点牌局。'
+        return settleBlackjackRound(key, round, 'surrender')
+      })
     })
 
   // ── 娱乐：彩票 ─────────────────────────────────────
