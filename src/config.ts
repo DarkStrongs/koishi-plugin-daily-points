@@ -57,6 +57,12 @@ export interface Config {
   dividendChance: number
   dividendRate: number
 
+  // 用户行为驱动市场（v1.11.0）
+  stockImpactRatio: number
+  stockImpactMaxBias: number
+  stockMomentumDecay: number
+  stockSectorLinkStrength: number
+
   // 赌场
   casinoEnabled: boolean
   casinoHouseEdge: number
@@ -93,6 +99,14 @@ export interface Config {
   robberyJailMinutes: number
   robberyDailyLimit: number
   robberyMinVictimCash: number
+
+  // 削弱模式（v1.10.0）：4 档机制开关 + 数值边界
+  robberyNerfMode: boolean
+  robberyVictimCooldownHours: number
+  robberyRevengeWindowMinutes: number
+  robberyRevengeBoost: number
+  robberyStreakLossThreshold: number
+  robberyStreakLossMultiplier: number
 
   // 广播
   broadcastChannels: string[]
@@ -155,6 +169,10 @@ export const Config = Schema.intersect([
     stockEventChance: Schema.number().default(0.08).min(0).max(1).step(0.01).description('每周期每只股票触发黑天鹅/利好事件的概率'),
     dividendChance: Schema.number().default(0.15).min(0).max(1).step(0.01).description('每周期发放一次分红的概率'),
     dividendRate: Schema.number().default(0.01).min(0).step(0.001).description('分红：每股发放 = 现价 × 此比例'),
+    stockImpactRatio: Schema.number().default(0.05).min(0).max(0.5).step(0.01).description('价格冲击阈值：玩家单笔 > 卖盘 N 倍时触发 1% 推动（0.05 = 5%）'),
+    stockImpactMaxBias: Schema.number().default(0.05).min(0).max(0.3).step(0.01).description('单 tick 累计冲击上限（防止恶性循环，0.05 = ±5%）'),
+    stockMomentumDecay: Schema.number().default(0.5).min(0).max(1).step(0.05).description('每 tick 动量衰减系数（0.5 = 衰减一半，0 = 立即清零）'),
+    stockSectorLinkStrength: Schema.number().default(0.3).min(0).max(1).step(0.05).description('板块联动强度：同板块其他股涨跌影响本股的比例（0.3 = 30%）'),
   }).description('股票设置'),
   Schema.object({
     casinoEnabled: Schema.boolean().default(true).description('启用赌场'),
@@ -193,6 +211,14 @@ export const Config = Schema.intersect([
     robberyDailyLimit: Schema.number().default(5).min(1).description('每日最多抢劫次数（成功+失败合计）'),
     robberyMinVictimCash: Schema.number().default(50).min(0).description('对方现金低于此值不可抢'),
   }).description('抢劫设置'),
+  Schema.object({
+    robberyNerfMode: Schema.boolean().default(true).description('抢劫削弱模式（v1.10.0）。开启后自动应用：成功率 0.3 / 抢得 15% / 失败赔 60% / 冷却 60min / 日限 3 次 + 4 档保护机制（被抢冷却 / 复仇加成 / 连败加刑 / 被抢方通知）。关闭则回到上方原始数值与机制。'),
+    robberyVictimCooldownHours: Schema.number().default(12).min(1).description('被抢保护：被同一人抢过 N 小时内，该人不能再来抢你'),
+    robberyRevengeWindowMinutes: Schema.number().default(30).min(1).description('复仇窗口：被抢 N 分钟内抢回对方，成功率按下方倍数加成'),
+    robberyRevengeBoost: Schema.number().default(1.5).min(1).max(3).step(0.1).description('复仇加成倍率（成功率 × 此值，上限 1.0）'),
+    robberyStreakLossThreshold: Schema.number().default(3).min(2).description('连续失败 N 次触发加刑'),
+    robberyStreakLossMultiplier: Schema.number().default(2).min(1).max(5).step(0.5).description('连续失败超过阈值后刑期倍数'),
+  }).description('抢劫削弱模式（v1.10.0 起生效）'),
   Schema.object({
     broadcastChannels: Schema.array(String).default([]).description('广播频道列表（格式：平台:频道ID，如 onebot:123456）。彩票开奖和股市新闻会主动发到这些频道'),
   }).description('广播设置'),

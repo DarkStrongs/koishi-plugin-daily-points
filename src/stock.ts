@@ -1,9 +1,9 @@
 import { Context } from 'koishi'
 import { Config, DAY, HOUR } from './config'
 import { CoreUtils } from './core'
-import { HoldingRow, StockRow } from './types'
+import { HoldingRow, SectorRow, StockRow, VolumeRow } from './types'
 import { fmtMoney, fmtTime, userKey } from './util'
-import { STOCK_SEED, IPO_PRESETS } from './seeds'
+import { SECTOR_DEFINITIONS, STOCK_SEED, IPO_PRESETS } from './seeds'
 
 export interface StockDeps {
   ctx: Context
@@ -13,32 +13,80 @@ export interface StockDeps {
 }
 
 export interface StockHelpers {
-  /** 主动推进行情（初始化时 + 每个刷新周期），返回当前所有股票行 */
   updateStocks(): Promise<StockRow[]>
-  /** 启动行情刷新定时器（由 index.ts 调用） */
   scheduleUpdates(): void
 }
 
-/** 股票系统：行情引擎 + 买入/卖出/持仓/K线 */
+/** 股票系统：行情引擎 + 撮合冲击 + 板块联动 + 5 命令 + 4 图表 */
 export function registerStock({ ctx, config, core, logger }: StockDeps): StockHelpers {
 
+  // ── 板块初始化 ──────────────────────────────────────
+  async function ensureSectors(): Promise<SectorRow[]> {
+    const existing = await ctx.database.get('daily_stock_sectors')
+    if (existing.length) return existing
+    await ctx.database.upsert('daily_stock_sectors', SECTOR_DEFINITIONS.map((s) => ({ ...s })))
+    return SECTOR_DEFINITIONS.slice()
+  }
+
+  /** 板块查找 */
+  async function sectorsByCode(): Promise<Map<string, SectorRow>> {
+    const list = await ensureSectors()
+    return new Map(list.map((s) => [s.code, s]))
+  }
+
+  /** 按板块聚合股票 */
+  function stocksBySector(stocks: StockRow[]): Map<string, StockRow[]> {
+    const m = new Map<string, StockRow[]>()
+    for (const s of stocks) {
+      const sec = (s as any).sector || 'unknown'
+      const arr = m.get(sec) || []
+      arr.push(s)
+      m.set(sec, arr)
+    }
+    return m
+  }
+
+  /** 当日日期（YYYY-MM-DD），按配置时区切日 */
+  function todayKey(): string {
+    return fmtTime(Date.now()).slice(0, 10) // fmtTime 是中文格式，改用下面的纯日期
+  }
+  // 上面那个是占位，下面这个是真正的 YYYY-MM-DD
+  function todayDate(): string {
+    const off = config.timezoneOffset || 8
+    const d = new Date(Date.now() + off * HOUR)
+    return d.toISOString().slice(0, 10)
+  }
+
+  // ── 行情引擎（基础） ──────────────────────────────────
   async function ensureStocks(): Promise<StockRow[]> {
     let stocks = await ctx.database.get('daily_stocks')
+    const sectors = await ensureSectors()
+    const sectorMap = new Map(sectors.map((s) => [s.code, s]))
     if (!stocks.length) {
       const now = new Date()
-      for (const s of STOCK_SEED) {
-        await ctx.database.create('daily_stocks', {
-          code: s.code,
-          name: s.name,
-          base: s.base,
-          vol: s.vol,
-          price: s.base,
-          prevPrice: s.base,
-          updatedAt: now,
-        })
-      }
+      // 用 upsert（基于 code 主键）做并发安全插入：第二次跑时 upsert 找到就跳过
+      const rows = STOCK_SEED.map((s) => ({
+        code: s.code,
+        name: s.name,
+        base: s.base,
+        vol: s.vol,
+        sector: sectorMap.has(s.sector) ? s.sector : 'consumer',
+        price: s.base,
+        prevPrice: s.base,
+        updatedAt: now,
+      }))
+      await ctx.database.upsert('daily_stocks', rows as any)
       stocks = await ctx.database.get('daily_stocks')
       await ctx.database.upsert('daily_meta', [{ key: 'stockLastUpdate', value: String(now.getTime()) }])
+    } else {
+      // 给老股票补 sector 字段（迁移）
+      const missing = stocks.filter((s: any) => !s.sector)
+      if (missing.length) {
+        const seedMap = new Map([...STOCK_SEED, ...IPO_PRESETS].map((s) => [s.code, s.sector]))
+        const upd = missing.map((s: any) => ({ code: s.code, sector: seedMap.get(s.code) || 'consumer' }))
+        await ctx.database.upsert('daily_stocks', upd as any)
+        stocks = await ctx.database.get('daily_stocks')
+      }
     }
     await seedHistory(stocks)
     const [metaCheck] = await ctx.database.get('daily_meta', { key: 'stockLastUpdate' })
@@ -81,11 +129,12 @@ export function registerStock({ ctx, config, core, logger }: StockDeps): StockHe
     }
   }
 
-  /** 单只股票走一步随机行情（带均值回归，防止无限暴涨/暴跌） */
-  function nextPrice(s: { base: number; price: number; vol: number }): number {
+  /** 单只股票走一步随机行情（带均值回归 + 板块联动） */
+  function nextPrice(s: { base: number; price: number; vol: number; sector?: string }, sectorChange?: number): number {
     const vol = s.vol * config.stockVolatility
     const drift = 0.03 * (s.base - s.price) / s.base
-    const p = s.price * (1 + drift + (Math.random() * 2 - 1) * vol)
+    const sectorBias = sectorChange ? sectorChange * (config.stockSectorLinkStrength || 0.3) : 0
+    const p = s.price * (1 + drift + sectorBias + (Math.random() * 2 - 1) * vol)
     return Math.max(0.5, Math.min(p, s.base * 10))
   }
 
@@ -122,19 +171,98 @@ export function registerStock({ ctx, config, core, logger }: StockDeps): StockHe
     const pool = IPO_PRESETS.filter((p) => !used.has(p.code))
     if (!pool.length) return
     const pick = pool[Math.floor(Math.random() * pool.length)]
-    await ctx.database.create('daily_stocks', {
+    const sectors = await sectorsByCode()
+    // IPO 也用 upsert（基于 code 主键），并发安全
+    await ctx.database.upsert('daily_stocks', [{
       code: pick.code,
       name: pick.name,
       base: pick.base,
       vol: pick.vol,
+      sector: sectors.has(pick.sector) ? pick.sector : 'consumer',
       price: pick.base,
       prevPrice: pick.base,
       updatedAt: new Date(),
       note: '新股上市，波动剧烈',
-    })
+    }] as any)
     const [newStock] = await ctx.database.get('daily_stocks', { code: pick.code })
-    await seedHistory([newStock])
+    if (newStock) await seedHistory([newStock])
     await setNewsAndBroadcast(`【${fmtTime(Date.now())}】🔔 新股上市：${pick.name}（${pick.code}），发行价 ${fmtMoney(pick.base)}，正式开盘交易！`)
+  }
+
+  // ── 用户行为驱动市场（v1.11.0 核心） ─────────────────
+  /**
+   * 撮合 + 价格冲击：
+   *   玩家单笔买入/卖出后写入 daily_stock_volume；
+   *   若单笔金额 > 当日累计卖盘/买盘的 stockImpactRatio 倍 → 推动现价 ±1~3%；
+   *   累计买盘/卖盘 > 日均阈值 → 触发"散户追捧/踩踏"系统事件。
+   * 返回：本笔产生的价格偏移（百分比，已应用）。
+   */
+  async function recordTrade(code: string, direction: 'buy' | 'sell', amount: number): Promise<{ bias: number; event: string | null }> {
+    const today = todayDate()
+    let [v] = await ctx.database.get('daily_stock_volume', { code, date: today })
+    if (!v) {
+      v = {
+        code,
+        date: today,
+        buyAmount: 0,
+        sellAmount: 0,
+        buyCount: 0,
+        sellCount: 0,
+        impactBias: 0,
+        lastEvent: '',
+        lastEventAt: new Date(0),
+      } as VolumeRow
+      await ctx.database.create('daily_stock_volume', { ...v })
+      const [fetched] = await ctx.database.get('daily_stock_volume', { code, date: today })
+      v = fetched || v
+    }
+    let bias = 0
+    let event: string | null = null
+
+    if (direction === 'buy') {
+      // 单笔冲击 = 金额 / 当日累计卖盘 超过 ratio
+      const ratio = v.sellAmount > 0 ? amount / v.sellAmount : 1
+      if (ratio > (config.stockImpactRatio || 0.05)) {
+        bias = Math.min(0.03, ratio * 0.02) // 上推，最多 3%
+      }
+      v.buyAmount += amount
+      v.buyCount += 1
+      // 散户追捧：累计买盘 > 日均阈值（今日累计卖盘的 30%）→ 触发
+      if (v.buyAmount > (v.sellAmount + 1) * 1.3 && v.lastEvent !== '追捧') {
+        bias += 0.05 + Math.random() * 0.05
+        event = '追捧'
+        v.lastEvent = '追捧'
+        v.lastEventAt = new Date()
+      }
+    } else {
+      const ratio = v.buyAmount > 0 ? amount / v.buyAmount : 1
+      if (ratio > (config.stockImpactRatio || 0.05)) {
+        bias = -Math.min(0.03, ratio * 0.02)
+      }
+      v.sellAmount += amount
+      v.sellCount += 1
+      if (v.sellAmount > (v.buyAmount + 1) * 1.3 && v.lastEvent !== '踩踏') {
+        bias -= 0.05 + Math.random() * 0.05
+        event = '踩踏'
+        v.lastEvent = '踩踏'
+        v.lastEventAt = new Date()
+      }
+    }
+    v.impactBias += bias
+    // 单 tick 累计冲击钳到 stockImpactMaxBias
+    const maxBias = config.stockImpactMaxBias || 0.05
+    if (v.impactBias > maxBias) v.impactBias = maxBias
+    if (v.impactBias < -maxBias) v.impactBias = -maxBias
+    await ctx.database.set('daily_stock_volume', { code, date: today }, {
+      buyAmount: v.buyAmount,
+      sellAmount: v.sellAmount,
+      buyCount: v.buyCount,
+      sellCount: v.sellCount,
+      impactBias: v.impactBias,
+      lastEvent: v.lastEvent,
+      lastEventAt: v.lastEventAt,
+    })
+    return { bias, event }
   }
 
   /** 分红（按概率，持股者每股得 现价 × dividendRate） */
@@ -153,7 +281,6 @@ export function registerStock({ ctx, config, core, logger }: StockDeps): StockHe
       if (amount <= 0) continue
       const [row] = await ctx.database.get('daily_points', { userId: h.userId })
       if (!row) continue
-      // 事务：分红发放原子化（虽然此处单笔独立，但写在一处更安全）
       await core.dbTx(async (db) => {
         const dbAny: any = db
         await dbAny.set('daily_points', { userId: h.userId }, {
@@ -169,9 +296,31 @@ export function registerStock({ ctx, config, core, logger }: StockDeps): StockHe
     }
   }
 
+  /** tick：动量衰减 + 板块联动 */
+  async function applyMomentumAndSectorLink(stocks: StockRow[]): Promise<Map<string, number>> {
+    const today = todayDate()
+    const decay = config.stockMomentumDecay || 0.5
+    // 衰减所有股票的 impactBias
+    const vols = await ctx.database.get('daily_stock_volume', { date: today })
+    for (const v of vols) {
+      if (Math.abs(v.impactBias) < 0.001) continue
+      const newBias = v.impactBias * (1 - decay)
+      await ctx.database.set('daily_stock_volume', { code: v.code, date: today }, { impactBias: newBias })
+    }
+    // 板块联动：计算每个板块均涨跌，注入 nextPrice 的 sectorChange
+    const group = stocksBySector(stocks)
+    const sectorChange = new Map<string, number>()
+    for (const [sec, arr] of group) {
+      const avgChange = arr.reduce((s, st) => s + (st.prevPrice ? (st.price / st.prevPrice - 1) : 0), 0) / Math.max(1, arr.length)
+      sectorChange.set(sec, avgChange)
+    }
+    return sectorChange
+  }
+
   /** 到期则补齐刷新（含停机期间），推进水位时间 */
   async function updateStocks(): Promise<StockRow[]> {
     const stocks = await ensureStocks()
+    await ensureSectors()
     const [meta] = await ctx.database.get('daily_meta', { key: 'stockLastUpdate' })
     const intervalMs = config.stockIntervalMinutes * 60000
     let last = meta ? Number(meta.value) : Date.now()
@@ -184,7 +333,10 @@ export function registerStock({ ctx, config, core, logger }: StockDeps): StockHe
     const eventScale = Math.min(1, config.stockIntervalMinutes / 60)
     const histRows: any[] = []
     let lastEventNews: string | null = null
+
     for (let i = 0; i < steps; i++) {
+      // 每步前衰减 + 计算板块联动
+      const sectorChange = await applyMomentumAndSectorLink(stocks)
       const stepMs = Math.min(last + (i + 1) * intervalMs, now)
       const stepTime = new Date(stepMs)
       for (const s of stocks) {
@@ -194,7 +346,12 @@ export function registerStock({ ctx, config, core, logger }: StockDeps): StockHe
         if (haltedMs > stepMs) {
           // 停牌中：价格冻结
         } else {
-          close = nextPrice(s)
+          close = nextPrice(s, sectorChange.get((s as any).sector) || 0)
+          // 应用冲击偏移（v1.11.0）
+          const [vol] = await ctx.database.get('daily_stock_volume', { code: s.code, date: todayDate() })
+          if (vol && Math.abs(vol.impactBias) > 0.001) {
+            close = close * (1 + vol.impactBias)
+          }
           if (Math.random() < config.stockEventChance * eventScale) {
             const ev = rollStockEvent(s)
             if (ev.haltPeriods) s.haltedUntil = new Date(stepMs + ev.haltPeriods * HOUR)
@@ -232,18 +389,20 @@ export function registerStock({ ctx, config, core, logger }: StockDeps): StockHe
 
   function scheduleUpdates() {
     if (!config.stockEnabled) return
-    updateStocks().catch((e) => logger.warn('股票行情初始化失败：', e))
     let inFlight = false
-    ctx.setInterval(() => {
+    // 首次初始化也走 inFlight 保护，防止并发时重复插入种子股
+    const runOnce = () => {
       if (inFlight) return
       inFlight = true
-      updateStocks()
+      return updateStocks()
         .catch((e) => logger.warn('股票行情刷新失败：', e))
         .finally(() => { inFlight = false })
-    }, config.stockIntervalMinutes * 60000)
+    }
+    runOnce()
+    ctx.setInterval(() => { runOnce() }, config.stockIntervalMinutes * 60000)
   }
 
-  // ── K线 HTML 渲染 ──────────────────────────────────
+  // ── 图表 HTML 渲染 ──────────────────────────────────
   function buildKlineHTML(stock: { name: string; code: string; price: number }, candles: { open: number; close: number; high: number; low: number }[]) {
     const W = 760, H = 420
     const padL = 18, padR = 70, padT = 56, padB = 30
@@ -290,6 +449,106 @@ export function registerStock({ ctx, config, core, logger }: StockDeps): StockHe
     return `<!DOCTYPE html><html><head><meta charset="utf-8"><style>body{margin:0;padding:0;}</style></head><body>${svg}</body></html>`
   }
 
+  /** 大盘指数图 + 涨跌分布（合成一张图） */
+  function buildMarketHTML(stocks: StockRow[], sectors: Map<string, SectorRow>): string {
+    const W = 760, H = 420
+    const padL = 18, padR = 70, padT = 56, padB = 30
+    const plotW = W - padL - padR, plotH = H - padT - padB
+
+    // 大盘指数：所有股票均价折线
+    const allPrices = stocks.map((s) => ({ prev: s.prevPrice || s.base, cur: s.price, name: s.name, code: s.code, sector: (s as any).sector }))
+    const avg = allPrices.reduce((s, p) => s + p.cur, 0) / Math.max(1, allPrices.length)
+    const prevAvg = allPrices.reduce((s, p) => s + p.prev, 0) / Math.max(1, allPrices.length)
+    const change = prevAvg ? (avg / prevAvg - 1) * 100 : 0
+
+    // 涨跌分布
+    const sorted = [...allPrices].sort((a, b) => (b.cur / b.prev - 1) - (a.cur / a.prev - 1))
+    const maxAbs = Math.max(0.01, ...sorted.map((p) => Math.abs(p.cur / p.prev - 1) * 100))
+
+    let svg = `<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg">`
+    svg += `<rect width="${W}" height="${H}" fill="#ffffff"/>`
+    svg += `<text x="${padL}" y="26" font-size="20" font-weight="600" fill="#1a1a1a" font-family="sans-serif">大盘指数</text>`
+    svg += `<text x="${padL}" y="46" font-size="13" fill="#5f6368" font-family="sans-serif">综合指数 ${fmtMoney(avg)} · ${change >= 0 ? '+' : ''}${change.toFixed(2)}% · 共 ${stocks.length} 只</text>`
+
+    // 上半：涨跌分布横向柱图
+    const halfH = plotH * 0.45
+    const barH = Math.min(12, halfH / Math.max(1, sorted.length))
+    sorted.forEach((p, i) => {
+      const cy = padT + i * barH + barH / 2
+      const pct = (p.cur / p.prev - 1) * 100
+      const color = pct >= 0 ? '#d93026' : '#0f9d58'
+      const barW = (Math.abs(pct) / maxAbs) * (plotW * 0.5)
+      const x = pct >= 0 ? padL + plotW * 0.5 : padL + plotW * 0.5 - barW
+      svg += `<rect x="${x.toFixed(1)}" y="${(cy - barH * 0.4).toFixed(1)}" width="${barW.toFixed(1)}" height="${(barH * 0.8).toFixed(1)}" fill="${color}"/>`
+      const labelX = pct >= 0 ? padL + plotW * 0.5 + barW + 6 : padL + plotW * 0.5 - barW - 6
+      const anchor = pct >= 0 ? 'start' : 'end'
+      svg += `<text x="${labelX}" y="${(cy + 3).toFixed(1)}" font-size="11" fill="#1a1a1a" text-anchor="${anchor}" font-family="sans-serif">${p.code} ${pct >= 0 ? '+' : ''}${pct.toFixed(2)}%</text>`
+    })
+    // 中线
+    const midX = padL + plotW * 0.5
+    svg += `<line x1="${midX}" y1="${padT}" x2="${midX}" y2="${padT + halfH}" stroke="#cccccc" stroke-width="1"/>`
+
+    // 下半：板块表现（按板块均涨跌）
+    const sectorGroup = stocksBySector(stocks)
+    const sectorStats: { code: string; name: string; color: string; icon: string; avgChg: number }[] = []
+    for (const [sec, arr] of sectorGroup) {
+      const avgChg = arr.reduce((s, st) => s + (st.prevPrice ? (st.price / st.prevPrice - 1) * 100 : 0), 0) / Math.max(1, arr.length)
+      const meta = sectors.get(sec)
+      sectorStats.push({ code: sec, name: meta?.name || sec, color: meta?.color || '#888888', icon: meta?.icon || '📊', avgChg })
+    }
+    const secMax = Math.max(1, ...sectorStats.map((s) => Math.abs(s.avgChg)))
+    const secY = padT + halfH + 20
+    const secBarW = Math.min(40, (plotW - 40) / sectorStats.length)
+    sectorStats.forEach((sec, i) => {
+      const cx = padL + i * (secBarW + 10) + secBarW / 2 + 10
+      const color = sec.avgChg >= 0 ? '#d93026' : '#0f9d58'
+      const barH = (Math.abs(sec.avgChg) / secMax) * 80
+      const yTop = sec.avgChg >= 0 ? secY + 80 - barH : secY + 80
+      svg += `<rect x="${(cx - secBarW / 2).toFixed(1)}" y="${yTop.toFixed(1)}" width="${secBarW.toFixed(1)}" height="${barH.toFixed(1)}" fill="${color}"/>`
+      svg += `<text x="${cx.toFixed(1)}" y="${(secY - 4).toFixed(1)}" font-size="14" text-anchor="middle" font-family="sans-serif">${sec.icon}</text>`
+      svg += `<text x="${cx.toFixed(1)}" y="${(secY + 95).toFixed(1)}" font-size="11" text-anchor="middle" fill="#666" font-family="sans-serif">${sec.name}</text>`
+      svg += `<text x="${cx.toFixed(1)}" y="${(secY + 110).toFixed(1)}" font-size="11" text-anchor="middle" fill="${color}" font-family="sans-serif">${sec.avgChg >= 0 ? '+' : ''}${sec.avgChg.toFixed(2)}%</text>`
+    })
+    svg += `<text x="${padL}" y="${(secY - 4).toFixed(1)}" font-size="13" fill="#5f6368" font-family="sans-serif">板块表现</text>`
+
+    svg += '</svg>'
+    return `<!DOCTYPE html><html><head><meta charset="utf-8"><style>body{margin:0;padding:0;}</style></head><body>${svg}</body></html>`
+  }
+
+  /** 资金流图：个股当日买卖净额柱状（按时段） */
+  function buildFlowHTML(stock: { name: string; code: string }, history: { time: Date; close: number }, volumes: VolumeRow[]): string {
+    const W = 760, H = 360
+    const padL = 18, padR = 70, padT = 56, padB = 30
+    const plotW = W - padL - padR, plotH = H - padT - padB
+    const r2 = (v: number) => Math.round(v * 100) / 100
+    // 简化：把所有历史 K 看作"时段"，按 close 涨跌归类（涨=买，绿柱↑；跌=卖，红柱↓）
+    const points = history ? [history] : []
+    let svg = `<svg width="${W}" height="${H}" viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg">`
+    svg += `<rect width="${W}" height="${H}" fill="#ffffff"/>`
+    svg += `<text x="${padL}" y="26" font-size="20" font-weight="600" fill="#1a1a1a" font-family="sans-serif">${stock.name}（${stock.code}）资金流</text>`
+    const today = volumes[0]
+    const buy = today?.buyAmount || 0
+    const sell = today?.sellAmount || 0
+    const net = buy - sell
+    svg += `<text x="${padL}" y="46" font-size="13" fill="#5f6368" font-family="sans-serif">当日累计买 ${fmtMoney(buy)} · 卖 ${fmtMoney(sell)} · 净 ${net >= 0 ? '+' : ''}${fmtMoney(net)}</text>`
+    if (today) {
+      const maxV = Math.max(buy, sell, 1)
+      const bw = Math.max(40, plotW / 2 - 20)
+      // 买柱
+      const buyH = (buy / maxV) * (plotH * 0.8)
+      svg += `<rect x="${padL}" y="${(padT + plotH - buyH).toFixed(1)}" width="${bw}" height="${buyH.toFixed(1)}" fill="#d93026"/>`
+      svg += `<text x="${(padL + bw / 2).toFixed(1)}" y="${(padT + plotH - buyH - 6).toFixed(1)}" font-size="13" text-anchor="middle" fill="#d93026" font-family="sans-serif">买入 ${fmtMoney(buy)}</text>`
+      // 卖柱
+      const sellH = (sell / maxV) * (plotH * 0.8)
+      svg += `<rect x="${(padL + bw + 20).toFixed(1)}" y="${(padT + plotH - sellH).toFixed(1)}" width="${bw}" height="${sellH.toFixed(1)}" fill="#0f9d58"/>`
+      svg += `<text x="${(padL + bw + 20 + bw / 2).toFixed(1)}" y="${(padT + plotH - sellH - 6).toFixed(1)}" font-size="13" text-anchor="middle" fill="#0f9d58" font-family="sans-serif">卖出 ${fmtMoney(sell)}</text>`
+    } else {
+      svg += `<text x="${(padL + plotW / 2).toFixed(1)}" y="${(padT + plotH / 2).toFixed(1)}" font-size="14" text-anchor="middle" fill="#999" font-family="sans-serif">暂无成交数据</text>`
+    }
+    svg += '</svg>'
+    return `<!DOCTYPE html><html><head><meta charset="utf-8"><style>body{margin:0;padding:0;}</style></head><body>${svg}</body></html>`
+  }
+
   // ── 命令注册 ─────────────────────────────────────────
 
   ctx.command('经济/股票', '查看实时股票行情')
@@ -297,26 +556,135 @@ export function registerStock({ ctx, config, core, logger }: StockDeps): StockHe
     .action(async () => {
       if (!config.stockEnabled) return '股票系统未开启。'
       const stocks = await updateStocks()
+      const sectors = await sectorsByCode()
       const now = Date.now()
-      const lines = stocks.map((s) => {
-        const change = s.prevPrice ? (s.price / s.prevPrice - 1) * 100 : 0
-        const arrow = change >= 0 ? '📈 +' : '📉 '
-        const halted = s.haltedUntil && new Date(s.haltedUntil).getTime() > now
-        const tag = halted ? '🚫停牌' : (s.note ? `📌${s.note}` : '')
-        return `${s.code} ${s.name}｜${fmtMoney(s.price)}（${arrow}${change.toFixed(2)}%）${tag}`
-      })
+      const group = stocksBySector(stocks)
+      const lines: string[] = []
+      for (const [sec, arr] of group) {
+        const meta = sectors.get(sec)
+        lines.push(`${meta?.icon || '📊'} ${meta?.name || sec}（${arr.length} 只）`)
+        for (const s of arr) {
+          const change = s.prevPrice ? (s.price / s.prevPrice - 1) * 100 : 0
+          const arrow = change >= 0 ? '📈 +' : '📉 '
+          const halted = s.haltedUntil && new Date(s.haltedUntil).getTime() > now
+          const tag = halted ? '🚫停牌' : (s.note ? `📌${s.note}` : '')
+          lines.push(`  ${s.code} ${s.name}｜${fmtMoney(s.price)}（${arrow}${change.toFixed(2)}%）${tag}`)
+        }
+      }
       const [meta] = await ctx.database.get('daily_meta', { key: 'stockLastUpdate' })
       const [ipoMeta] = await ctx.database.get('daily_meta', { key: 'stockIPOCounter' })
       const [newsMeta] = await ctx.database.get('daily_meta', { key: 'stockNews' })
       const nextMin = meta ? Math.max(0, Math.ceil((Number(meta.value) + config.stockIntervalMinutes * 60000 - Date.now()) / 60000)) : config.stockIntervalMinutes
-      const out = [`📊 股票行情（每 ${config.stockIntervalMinutes} 分钟刷新一次）：`, ...lines]
+      const out = [`📊 股票行情（按板块，每 ${config.stockIntervalMinutes} 分钟刷新一次）：`, ...lines]
       if (newsMeta?.value) out.push(`📰 最新消息：${newsMeta.value}`)
       if (config.ipoPeriods > 0 && stocks.length < config.stockMaxCount) {
         const target = Math.max(1, Math.round(config.ipoPeriods * 60 / Math.max(1, config.stockIntervalMinutes)))
         out.push(`🔔 新股上市倒计时：还需 ${Math.max(1, target - Number(ipoMeta?.value || 0))} 个周期（当前 ${stocks.length}/${config.stockMaxCount} 只）`)
       }
-      out.push(`下次刷新约 ${nextMin} 分钟后。买入用「买入 代码 数量」，看走势发「K线 代码」`)
+      out.push(`下次刷新约 ${nextMin} 分钟后。更多指令：大盘 / 股票排行 / 资金流 <代码> / 持仓榜`)
       return out.join('\n')
+    })
+
+  // 大盘（v1.11.0）：综合指数 + 涨跌分布 + 板块表现
+  ctx.command('经济/股票/大盘', '查看大盘指数和板块表现（图表）')
+    .alias('大盘')
+    .action(async () => {
+      if (!config.stockEnabled) return '股票系统未开启。'
+      const stocks = await updateStocks()
+      const sectors = await sectorsByCode()
+      if (!ctx.puppeteer) {
+        // 降级：文字
+        const avg = stocks.reduce((s, st) => s + st.price, 0) / Math.max(1, stocks.length)
+        const prevAvg = stocks.reduce((s, st) => s + (st.prevPrice || st.base), 0) / Math.max(1, stocks.length)
+        const chg = prevAvg ? (avg / prevAvg - 1) * 100 : 0
+        const group = stocksBySector(stocks)
+        const lines: string[] = [`📊 大盘指数 ${fmtMoney(avg)}（${chg >= 0 ? '+' : ''}${chg.toFixed(2)}%）`, '']
+        for (const [sec, arr] of group) {
+          const avgChg = arr.reduce((s, st) => s + (st.prevPrice ? (st.price / st.prevPrice - 1) * 100 : 0), 0) / Math.max(1, arr.length)
+          const meta = sectors.get(sec)
+          lines.push(`${meta?.icon || '📊'} ${meta?.name || sec}：${avgChg >= 0 ? '+' : ''}${avgChg.toFixed(2)}%（${arr.length} 只）`)
+        }
+        return lines.join('\n') + '\n提示：启用 puppeteer 插件可看图。'
+      }
+      try {
+        return await ctx.puppeteer.render(buildMarketHTML(stocks, sectors))
+      } catch (e) {
+        logger.warn('大盘图渲染失败：', e)
+        return '大盘图渲染失败，请稍后再试。'
+      }
+    })
+
+  // 股票排行（v1.11.0）：按涨跌幅排前 5 / 后 5
+  ctx.command('经济/股票/股票排行 [count:number]', '按涨跌幅排行前 N / 后 N（默认 5）')
+    .alias('股票排行', '涨幅榜', '跌幅榜')
+    .action(async (_session, count) => {
+      if (!config.stockEnabled) return '股票系统未开启。'
+      const n = Math.min(Math.max(count || 5, 3), 12)
+      const stocks = await updateStocks()
+      const sorted = [...stocks].sort((a, b) => (b.price / (b.prevPrice || b.base) - 1) - (a.price / (a.prevPrice || a.base) - 1))
+      const top = sorted.slice(0, n)
+      const bottom = sorted.slice(-n).reverse()
+      const lines = ['📊 涨幅榜：']
+      for (const s of top) {
+        const chg = (s.price / (s.prevPrice || s.base) - 1) * 100
+        lines.push(`  ${s.code} ${s.name}：${fmtMoney(s.price)}（+${chg.toFixed(2)}%）`)
+      }
+      lines.push('📉 跌幅榜：')
+      for (const s of bottom) {
+        const chg = (s.price / (s.prevPrice || s.base) - 1) * 100
+        lines.push(`  ${s.code} ${s.name}：${fmtMoney(s.price)}（${chg.toFixed(2)}%）`)
+      }
+      return lines.join('\n')
+    })
+
+  // 成交榜（v1.11.0）：当日成交额 / 笔数前 5
+  ctx.command('经济/股票/成交榜 [count:number]', '当日成交额排行（默认 5）')
+    .alias('成交榜')
+    .action(async (_session, count) => {
+      if (!config.stockEnabled) return '股票系统未开启。'
+      const n = Math.min(Math.max(count || 5, 3), 12)
+      const today = todayDate()
+      const vols = await ctx.database.get('daily_stock_volume', { date: today })
+      const stocks = await updateStocks()
+      const nameMap = new Map(stocks.map((s) => [s.code, s.name]))
+      const sorted = [...vols].sort((a, b) => (b.buyAmount + b.sellAmount) - (a.buyAmount + a.sellAmount))
+      const top = sorted.slice(0, n)
+      if (!top.length) return '今日暂无成交，发送「股票」看看行情，「买入 代码 数量」开始交易。'
+      const lines = ['💰 今日成交榜（按总成交额）：']
+      for (const v of top) {
+        const total = v.buyAmount + v.sellAmount
+        const net = v.buyAmount - v.sellAmount
+        lines.push(`  ${v.code} ${nameMap.get(v.code) || ''}：${fmtMoney(total)}（买 ${fmtMoney(v.buyAmount)} / 卖 ${fmtMoney(v.sellAmount)} · 净 ${net >= 0 ? '+' : ''}${fmtMoney(net)} · ${v.buyCount + v.sellCount} 笔）`)
+      }
+      return lines.join('\n')
+    })
+
+  // 资金流（v1.11.0）：个股当日买卖净额
+  ctx.command('经济/股票/资金流 <code:string>', '查看个股当日资金流向（图表）')
+    .alias('资金流')
+    .action(async ({ session }, code) => {
+      if (!session.userId) return
+      if (!config.stockEnabled) return '股票系统未开启。'
+      if (!code) return '请提供股票代码，如「资金流 DMHJ」。'
+      const upper = String(code).trim().toUpperCase()
+      const stocks = await updateStocks()
+      const stock = stocks.find((s) => s.code === upper)
+      if (!stock) return `没有找到股票「${upper}」，发送「股票」查看列表。`
+      const today = todayDate()
+      const vols = await ctx.database.get('daily_stock_volume', { code: upper, date: today })
+      if (!ctx.puppeteer) {
+        const v = vols[0]
+        if (!v) return `${stock.name}（${upper}）今日暂无成交。`
+        const net = v.buyAmount - v.sellAmount
+        return `${stock.name}（${upper}）今日资金流\n买 ${fmtMoney(v.buyAmount)}（${v.buyCount} 笔）\n卖 ${fmtMoney(v.sellAmount)}（${v.sellCount} 笔）\n净 ${net >= 0 ? '+' : ''}${fmtMoney(net)}\n提示：启用 puppeteer 插件可看图。`
+      }
+      try {
+        const hist = await ctx.database.get('daily_stock_history', { code: upper }, { sort: { time: 'desc' }, limit: 1 })
+        return await ctx.puppeteer.render(buildFlowHTML({ name: stock.name, code: upper }, hist[0], vols))
+      } catch (e) {
+        logger.warn('资金流渲染失败：', e)
+        return '资金流图渲染失败，请稍后再试。'
+      }
     })
 
   ctx.command('经济/股票/K线 [code:string] [count:number]', '查看股票K线走势图')
@@ -344,6 +712,36 @@ export function registerStock({ ctx, config, core, logger }: StockDeps): StockHe
       }
     })
 
+  // 持仓榜（v1.11.0）：玩家浮盈率前 10
+  ctx.command('经济/股票/持仓榜', '玩家浮盈率排行榜（前 10）')
+    .alias('持仓榜', '股票榜')
+    .action(async () => {
+      if (!config.stockEnabled) return '股票系统未开启。'
+      const stocks = await updateStocks()
+      const priceMap = new Map(stocks.map((s) => [s.code, s.price]))
+      const all = await ctx.database.get('daily_stock_holding')
+      // 按 userId 聚合
+      const userTotals = new Map<string, { value: number; cost: number }>()
+      for (const h of all) {
+        const cur = priceMap.get(h.code) || 0
+        const value = cur * h.quantity
+        const u = userTotals.get(h.userId) || { value: 0, cost: 0 }
+        u.value += value
+        u.cost += h.cost
+        userTotals.set(h.userId, u)
+      }
+      const ranked = Array.from(userTotals.entries())
+        .map(([uid, u]) => ({ uid, value: u.value, cost: u.cost, profit: u.value - u.cost, pct: u.cost > 0 ? (u.value - u.cost) / u.cost * 100 : 0 }))
+        .sort((a, b) => b.pct - a.pct)
+        .slice(0, 10)
+      if (!ranked.length) return '当前无人持仓，发送「股票」看行情，「买入 代码 数量」建仓。'
+      const lines = ['🏆 持仓浮盈榜（前 10）：']
+      ranked.forEach((r, i) => {
+        lines.push(`  ${i + 1}. ${r.uid}：${r.pct >= 0 ? '+' : ''}${r.pct.toFixed(2)}%（市值 ${fmtMoney(r.value)} · 成本 ${fmtMoney(r.cost)} · 浮盈 ${r.profit >= 0 ? '+' : ''}${fmtMoney(r.profit)}）`)
+      })
+      return lines.join('\n')
+    })
+
   ctx.command('经济/股票/买入 <code:string> <qty:integer>', '用现金买入股票')
     .action(async ({ session }, code, qty) => {
       if (!session.userId) return
@@ -363,7 +761,7 @@ export function registerStock({ ctx, config, core, logger }: StockDeps): StockHe
       const row = await core.getUser(key)
       if (row.points < total) return `现金不足：需要 ${total}，当前 ${row.points}。`
       const [holding] = await ctx.database.get('daily_stock_holding', { userId: key, code: upper })
-      // 事务：扣现金 + 更新/创建持仓 原子化
+      // 事务：扣现金 + 更新/创建持仓 + 写入成交量 + 应用价格冲击
       return await core.dbTx(async (db) => {
         const dbAny: any = db
         if (holding) {
@@ -380,7 +778,14 @@ export function registerStock({ ctx, config, core, logger }: StockDeps): StockHe
           })
         }
         await dbAny.set('daily_points', { userId: key }, { points: row.points - total })
-        return `买入成功：${stock.name}（${upper}）× ${qty} @ ${fmtMoney(stock.price)}，花费 ${total}，现金剩余 ${row.points - total}`
+        // 写入成交量 + 冲击
+        const { bias, event } = await recordTrade(upper, 'buy', total)
+        if (Math.abs(bias) > 0.001) {
+          const [s] = await dbAny.get('daily_stocks', { code: upper })
+          if (s) await dbAny.set('daily_stocks', { code: upper }, { price: Math.max(0.5, Math.round(s.price * (1 + bias) * 100) / 100) })
+        }
+        const evtText = event === '追捧' ? ' 📢触发散户追捧事件！' : ''
+        return `买入成功：${stock.name}（${upper}）× ${qty} @ ${fmtMoney(stock.price)}，花费 ${total}，现金剩余 ${row.points - total}${evtText}`
       })
     })
 
@@ -405,7 +810,7 @@ export function registerStock({ ctx, config, core, logger }: StockDeps): StockHe
       const costPart = Math.round(holding.cost * qty / holding.quantity)
       const profit = proceeds - costPart
       const row = await core.getUser(key)
-      // 事务：减仓 + 加现金 原子化
+      // 事务：减仓 + 加现金 + 写入成交量 + 应用价格冲击
       return await core.dbTx(async (db) => {
         const dbAny: any = db
         if (qty === holding.quantity) {
@@ -417,8 +822,14 @@ export function registerStock({ ctx, config, core, logger }: StockDeps): StockHe
           })
         }
         await dbAny.set('daily_points', { userId: key }, { points: row.points + proceeds })
+        const { bias, event } = await recordTrade(upper, 'sell', proceeds)
+        if (Math.abs(bias) > 0.001) {
+          const [s] = await dbAny.get('daily_stocks', { code: upper })
+          if (s) await dbAny.set('daily_stocks', { code: upper }, { price: Math.max(0.5, Math.round(s.price * (1 + bias) * 100) / 100) })
+        }
+        const evtText = event === '踩踏' ? ' 📢触发恐慌踩踏事件！' : ''
         return [
-          `卖出成功：${stock.name}（${upper}）× ${qty} @ ${fmtMoney(stock.price)}，获得 ${proceeds}`,
+          `卖出成功：${stock.name}（${upper}）× ${qty} @ ${fmtMoney(stock.price)}，获得 ${proceeds}${evtText}`,
           `本次盈亏：${profit >= 0 ? '+' : ''}${profit}（成本 ${costPart}）`,
           `现金：${row.points + proceeds}`,
         ].join('\n')

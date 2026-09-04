@@ -64,6 +64,25 @@ export interface HoldingRow {
     quantity: number;
     cost: number;
 }
+/** v1.11.0：每只股每日累计买卖数据（驱动市场） */
+export interface VolumeRow {
+    code: string;
+    date: string;
+    buyAmount: number;
+    sellAmount: number;
+    buyCount: number;
+    sellCount: number;
+    impactBias: number;
+    lastEvent: string;
+    lastEventAt: Date;
+}
+/** v1.11.0：板块定义（投研 + 联动） */
+export interface SectorRow {
+    code: string;
+    name: string;
+    color: string;
+    icon: string;
+}
 export interface MetaRow {
     key: string;
     value: string;

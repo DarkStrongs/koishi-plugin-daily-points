@@ -138,6 +138,23 @@ declare module 'koishi' {
       distributedAt: Date | null
       shareCount: number
     }
+    daily_stock_sectors: {
+      code: string
+      name: string
+      color: string
+      icon: string
+    }
+    daily_stock_volume: {
+      code: string
+      date: string
+      buyAmount: number
+      sellAmount: number
+      buyCount: number
+      sellCount: number
+      impactBias: number
+      lastEvent: string
+      lastEventAt: Date
+    }
   }
 
   interface Session {

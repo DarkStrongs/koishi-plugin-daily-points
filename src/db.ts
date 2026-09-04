@@ -221,4 +221,29 @@ export function registerModels(ctx: Context): void {
   }, {
     primary: 'monthKey',
   })
+
+  // 板块定义（v1.11.0：投研联动）
+  ctx.model.extend('daily_stock_sectors', {
+    code: 'string(16)',
+    name: 'string(32)',
+    color: 'string(8)',
+    icon: 'string(8)',
+  }, {
+    primary: 'code',
+  })
+
+  // 股票每日成交量（v1.11.0：用户行为驱动市场）
+  ctx.model.extend('daily_stock_volume', {
+    code: 'string(16)',
+    date: 'string(10)',
+    buyAmount: 'double',
+    sellAmount: 'double',
+    buyCount: 'unsigned',
+    sellCount: 'unsigned',
+    impactBias: 'double',
+    lastEvent: 'string(32)',
+    lastEventAt: 'timestamp(3)',
+  }, {
+    primary: ['code', 'date'],
+  })
 }

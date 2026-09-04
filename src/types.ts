@@ -71,6 +71,27 @@ export interface HoldingRow {
   cost: number
 }
 
+/** v1.11.0：每只股每日累计买卖数据（驱动市场） */
+export interface VolumeRow {
+  code: string
+  date: string         // YYYY-MM-DD（按配置时区切日）
+  buyAmount: number    // 当日累计买入积分
+  sellAmount: number   // 当日累计卖出积分
+  buyCount: number     // 当日买入笔数
+  sellCount: number    // 当日卖出笔数
+  impactBias: number   // 累计冲击偏移（±百分比，带衰减）
+  lastEvent: string    // 最后一次系统事件名（追捧/踩踏），用于去重
+  lastEventAt: Date
+}
+
+/** v1.11.0：板块定义（投研 + 联动） */
+export interface SectorRow {
+  code: string         // 主键，如 'tech' / 'consumer' / 'finance' / 'energy'
+  name: string         // 板块名
+  color: string        // 图表用的色值，如 '#d93026'
+  icon: string         // 板块 emoji，如 '🔬'
+}
+
 export interface MetaRow {
   key: string
   value: string

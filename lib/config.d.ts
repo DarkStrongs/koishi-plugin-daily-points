@@ -44,6 +44,10 @@ export interface Config {
     stockEventChance: number;
     dividendChance: number;
     dividendRate: number;
+    stockImpactRatio: number;
+    stockImpactMaxBias: number;
+    stockMomentumDecay: number;
+    stockSectorLinkStrength: number;
     casinoEnabled: boolean;
     casinoHouseEdge: number;
     casinoMinBet: number;
@@ -73,6 +77,12 @@ export interface Config {
     robberyJailMinutes: number;
     robberyDailyLimit: number;
     robberyMinVictimCash: number;
+    robberyNerfMode: boolean;
+    robberyVictimCooldownHours: number;
+    robberyRevengeWindowMinutes: number;
+    robberyRevengeBoost: number;
+    robberyStreakLossThreshold: number;
+    robberyStreakLossMultiplier: number;
     broadcastChannels: string[];
 }
 export declare const HOUR = 3600000;
