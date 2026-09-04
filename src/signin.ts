@@ -117,11 +117,24 @@ export function registerSignin({ ctx, config, core, onSigninSuccess, getCardCoun
         limit: Math.ceil(config.leaderboardSize),
       })
       if (!rows.length) return '还没有人签到过哦～'
-      const lines = rows.map((row, i) => {
-        const userId = row.userId.includes(':') ? row.userId.split(':')[1] : row.userId
-        const medal = i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : `${i + 1}.`
-        return `${medal} ${h('at', { id: userId })}  ${row.points} 分`
-      })
+      const lines = []
+      let rank = 0
+      for (const row of rows) {
+        // 提取 QQ 号：必须为纯数字（onebot qq 字段仅接受数字 QQ）
+        const rawId = row.userId.includes(':') ? row.userId.split(':').slice(-1)[0] : row.userId
+        // 跳过异常 userId（空 / 含非数字 / 数字段超过 12 位也不可信）
+        const safeId = typeof rawId === 'string' && /^\d{1,12}$/.test(rawId) ? rawId : null
+        // 同分跳过名次上升（先占名次再渲染）
+        rank += 1
+        const medal = rank === 1 ? '🥇' : rank === 2 ? '🥈' : rank === 3 ? '🥉' : `${rank}.`
+        if (safeId) {
+          lines.push(`${medal} ${h('at', { id: safeId })}  ${row.points} 分`)
+        } else {
+          // 非 onebot 平台（sandbox/web）回退为文本展示，避免 onebot 拒绝整条消息
+          const fallback = rawId || row.userId || '匿名'
+          lines.push(`${medal} ${fallback}  ${row.points} 分`)
+        }
+      }
       return `积分排行榜：\n${lines.join('\n')}`
     })
 

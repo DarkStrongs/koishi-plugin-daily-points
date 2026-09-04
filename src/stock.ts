@@ -249,7 +249,7 @@ export function registerStock({ ctx, config, core, logger }: StockDeps): StockHe
       }
     }
     v.impactBias += bias
-    // 单 tick 累计冲击钳到 stockImpactMaxBias
+    // 单小时 累计冲击钳到 stockImpactMaxBias
     const maxBias = config.stockImpactMaxBias || 0.05
     if (v.impactBias > maxBias) v.impactBias = maxBias
     if (v.impactBias < -maxBias) v.impactBias = -maxBias
@@ -296,7 +296,7 @@ export function registerStock({ ctx, config, core, logger }: StockDeps): StockHe
     }
   }
 
-  /** tick：动量衰减 + 板块联动 */
+  /** 每小时 推进：动量衰减 + 板块联动 */
   async function applyMomentumAndSectorLink(stocks: StockRow[]): Promise<Map<string, number>> {
     const today = todayDate()
     const decay = config.stockMomentumDecay || 0.5

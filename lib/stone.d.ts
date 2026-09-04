@@ -2,14 +2,19 @@ import { Context } from 'koishi';
 import { Config } from './config';
 import { CoreUtils } from './core';
 /**
- * v1.15.0 赌石（收藏型积分回收）系统
+ * v1.16.0 赌石（产地×属性×评语×废石升级）
  *
- * 设计核心：
- *  - 强制囤石流（不买不切不卖→不卖啥事都没有；卖掉就亏）
- *  - 词条是 RPG 风格的随机 affix 集合
- *  - 立即卖出价 = basePrice × (词条价值总和)，亏；持有越久价值越高，但有软/硬上限
- *  - 卖出后部分流回赌场池（v1.12.0 已建立的连接），剩余部分销毁
- *  - E[立即卖] < 买入价 → 高投入低回报（积分回收）
+ * 新增维度：
+ *  - 11 个产地（缅甸 / 越南 / 日本 / 新疆 / 云南 / 俄罗斯 / 蒙古 / 巴西 / 阿根廷 / 泰国 / 江湖散石）
+ *  - 5 维随机属性（体积 / 形状 / 皮壳 / 透光度 / 净度），全部影响出货概率
+ *  - 完整评语系统（切石后生成完整段落：来源 / 外形 / 切割结果 / 评级 / 建议）
+ *  - 8 种废石头（除 trash + brick，新增 sandstone / limestone / ore / cracked / blinded / fake_skin）
+ *  - 价格档提价 5×~15×（T1=¥500；T5=¥1.5M；与产地 mul 相乘可达 ¥3.75M）
+ *
+ * 与 v1.15.0 关系：
+ *  - market/inventory 各加 2 列（origin + attributes）+ inventory +3 列（comment/grade/wasteSubtype）
+ *  - stone_types +1 列（originCatalog JSON，列出该类石头支持的产地与稀有度修正）
+ *  - 已有命令行为完全兼容；旧数据没新列时默认 'various' + {}
  */
 export interface StoneDeps {
     ctx: Context;
@@ -23,5 +28,14 @@ export interface StoneDeps {
 export interface StoneHelpers {
     /** 启动定时器：刷新市场 + 清理过期库存 */
     scheduleStoneMarketRefresh(): void;
+}
+export interface OriginSeed {
+    code: string;
+    name: string;
+    flag: string;
+    priceMul: number;
+    /** 任意稀有度倍率（key 含 base 的 brick/common/rare/epic/legendary/supreme + 子废石 trash） */
+    rarityMod: Record<string, number>;
+    stoneTypes: string[];
 }
 export declare function registerStone({ ctx, config, core, casino }: StoneDeps): StoneHelpers;

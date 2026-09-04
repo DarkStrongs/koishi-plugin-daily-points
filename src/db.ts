@@ -324,7 +324,7 @@ export function registerModels(ctx: Context): void {
     zoneCode: 'string(16)',
     price: 'double',
     time: 'timestamp(3)',
-    event: 'string(32)',        // tick / bubble_crash / policy / disaster
+    event: 'string(32)',        // hourly_update(每小时推进) / bubble_crash / policy / disaster
   }, {
     primary: 'id',
     autoInc: true,
@@ -359,6 +359,7 @@ export function registerModels(ctx: Context): void {
   // 类型种子表：5 类原石 + 该类词条池
   // affixPool: JSON 字符串 '[{code,name,value}, ...]'（value = 加成比例，如 0.50 代表 +50%）
   // rarityWeights: JSON 字符串 '{brick:0.35, common:0.25, rare:0.18, epic:0.12, legendary:0.07, supreme:0.03}'
+  // v1.16.0 新增 originCatalog: 该类石头支持的所有产地 + 相关配置
   ctx.model.extend('daily_stone_types', {
     code: 'string(16)',         // jadeite / hetian / nanhong / agate / common
     name: 'string(32)',
@@ -367,22 +368,26 @@ export function registerModels(ctx: Context): void {
     basePrice: 'double',        // 该类原石的统一基础购入价
     affixPool: 'string(2048)',  // 词条池 JSON
     rarityWeights: 'string(256)',// 稀有度分布 JSON
+    originCatalog: 'string(2048)',// v1.16.0：产地目录 JSON（由 ensureStoneTypes 种子化）
     updatedAt: 'timestamp(3)',
   }, {
     primary: 'code',
   })
 
   // 当前市场库存（24h 自动刷新 / 启动时过期清理）
+  // v1.16.0 新增：origin(产地代码) + attributes(JSON: 5维随机属性)
   ctx.model.extend('daily_stone_market', {
     id: 'unsigned',
     stoneType: 'string(16)',    // 引用 daily_stone_types.code
     priceTier: 'unsigned',      // 0..4 对应 stonePriceTiers
+    origin: 'string(32)',       // v1.16.0：产地代码（myanmar/vietnam/japan/xinjiang/.../various）
+    attributes: 'string(1024)', // v1.16.0：JSON: { size, shape, skin, transparency, clarity }
     listedAt: 'timestamp(3)',
     expiresAt: 'timestamp(3)',
   }, {
     primary: 'id',
     autoInc: true,
-    index: [['stoneType'], ['expiresAt']],
+    index: [['stoneType'], ['origin'], ['expiresAt']],
   })
 
   // 用户背包：未切 / 已切未卖 / 已卖 三态复用一张表
@@ -390,14 +395,20 @@ export function registerModels(ctx: Context): void {
   //   rarity = brick / common / rare / epic / legendary / supreme（切后才有值）
   //   affixes = JSON 字符串 '[{"code":"xxx","name":"帝王绿","value":1.5}, ...]'（砖头 = '[]'）
   //   saleMultiplier = 词条价值总和（不含砖头 5% 保护），砖头 = 0.05
+  //   v1.16.0 新增：origin / attributes(切前快照) / comment(切后评语) / grade / wasteSubtype
   ctx.model.extend('daily_stone_inventory', {
     id: 'unsigned',
     userId: 'string(64)',
     stoneType: 'string(16)',
     priceTier: 'unsigned',
+    origin: 'string(32)',       // v1.16.0：产地代码
+    attributes: 'string(1024)', // v1.16.0：切前快照（切后保留以备查）
     boughtAt: 'timestamp(3)',
     cutAt: 'timestamp(3)',
     rarity: 'string(16)',
+    wasteSubtype: 'string(16)', // v1.16.0：trash 的 8 种子分类
+    comment: 'string(1024)',    // v1.16.0：切开时生成的完整评语
+    grade: 'string(8)',         // v1.16.0：A+ / A / B+ / B / C / D
     affixes: 'string(512)',
     saleMultiplier: 'double',   // 立即卖出时的词条系数（砖头 0.05）
     status: 'string(16)',       // holding / cut / sold
@@ -406,7 +417,7 @@ export function registerModels(ctx: Context): void {
   }, {
     primary: 'id',
     autoInc: true,
-    index: [['userId'], ['stoneType'], ['status'], ['boughtAt']],
+    index: [['userId'], ['stoneType'], ['origin'], ['status'], ['boughtAt']],
   })
 
   // 词条图鉴（玩家已发现的词条）
@@ -421,5 +432,114 @@ export function registerModels(ctx: Context): void {
     autoInc: true,
     unique: [['userId', 'stoneType', 'affixCode']],
     index: [['userId']],
+  })
+
+  // ─────── v1.17.0 房地产系统 v2：开发商 / 楼盘 / 户型 / 投资 ───────
+
+  // 开发商（4 家固定 NPC）
+  //   brand = luxury / mid / economy（豪华 / 中端 / 经济）
+  //   specialty = JSON: 该开发商擅长建造的户型类型数组，例如 ["house", "apartment"] 或 ["mansion"]
+  //   reputation = 信誉 0-100（开盘热度 / 烂尾风险系数）
+  ctx.model.extend('daily_property_developers', {
+    code: 'string(16)',         // 主键：开发商代号
+    name: 'string(32)',         // 显示名（带品牌后缀）
+    icon: 'string(8)',
+    brand: 'string(16)',        // luxury / mid / economy
+    specialty: 'string(128)',   // JSON 数组
+    reputation: 'double',       // 0-100
+    totalProjects: 'unsigned',  // 累计承接楼盘数（含历史已售罄）
+    completedProjects: 'unsigned',
+    createdAt: 'timestamp(3)',
+    updatedAt: 'timestamp(3)',
+  }, {
+    primary: 'code',
+  })
+
+  // 楼盘（开发商承接的项目）
+  //   status:
+  //     planning      —— 规划中：可投资,不可买,预计 N 小时 后开工
+  //     building      —— 施工中：可投资,不可买,预计 N 小时 后开盘
+  //     presale       —— 开盘（可买；投资者优先窗口期内只对投资者开放）
+  //     sold_out      —— 售罄：等 N 小时 后竣工
+  //     completed     —— 竣工：投资者分红已结算
+  //     derelict      —— 烂尾：投资者按退款率结算退款
+  //   fundingRequired = 项目启动所需资金（= 楼盘系数 × 区域基础价 × 总套数 × 户型基础系数）
+  //   fundingCollected = 当前已投资总额（用于分红池计算）
+  //   expectedReturn = 竣工后回报率（cost × 此系数作为投资者分红池）
+  ctx.model.extend('daily_property_projects', {
+    id: 'unsigned',
+    code: 'string(16)',         // 编号: P-2026-001
+    name: 'string(32)',         // 楼盘名: 金色家园
+    developerCode: 'string(16)',// 开发商代号
+    zoneCode: 'string(16)',     // 地块所在区域
+    type: 'string(16)',         // 主推户型类型
+    quality: 'unsigned',        // 1-5（决定楼栋基础品质均值）
+    totalUnits: 'unsigned',     // 总套数
+    remainingUnits: 'unsigned', // 剩余可售
+    basePrice: 'double',        // 楼盘基础单价（每平米）
+    fundingRequired: 'double',  // 启动资金缺口
+    fundingCollected: 'double', // 当前已投资
+    expectedReturn: 'double',   // 预期回报率(0.10-0.30)
+    status: 'string(16)',
+    statusTickLeft: 'unsigned', // 距下一阶段转换还需几小时
+    startedAt: 'timestamp(3)',
+    openedAt: 'timestamp(3)',
+    completedAt: 'timestamp(3)',
+    createdAt: 'timestamp(3)',
+    updatedAt: 'timestamp(3)',
+  }, {
+    primary: 'id',
+    autoInc: true,
+    unique: ['code'],
+    index: [['developerCode'], ['zoneCode'], ['status']],
+  })
+
+  // 户型（开盘后生成）
+  //   layout = "1室1厅" / "2室1厅" / "3室2厅" / "4室2厅" / "商铺" / "写字楼" 等
+  //   facing = south / north / east / west / southeast（影响价格系数）
+  //   status = available / reserved（投资者优先窗口期内锁住）/ sold
+  ctx.model.extend('daily_property_units', {
+    id: 'unsigned',
+    projectId: 'unsigned',      // 所属楼盘
+    building: 'string(8)',      // 楼栋号
+    unitNumber: 'string(16)',   // 房号
+    floor: 'unsigned',
+    area: 'double',             // 面积（㎡）
+    facing: 'string(8)',        // 朝向
+    layout: 'string(16)',       // 户型
+    quality: 'unsigned',        // 1-5
+    price: 'double',            // 总价
+    status: 'string(16)',       // available / reserved / sold
+    reservedFor: 'string(64)',  // reserved 时锁定给某 userId（投资者优先窗口）
+    buyerUserId: 'string(64)',
+    soldAt: 'timestamp(3)',
+    createdAt: 'timestamp(3)',
+  }, {
+    primary: 'id',
+    autoInc: true,
+    index: [['projectId'], ['status']],
+  })
+
+  // 投资记录（玩家投了哪个楼盘）
+  //   status:
+  //     active     —— 投资中（项目未竣工/未烂尾）
+  //     collected  —— 已收到分红（项目竣工后系统结算）
+  //     refunded   —— 已退款（项目烂尾）
+  //   payout = 已收到的分红或退款金额
+  ctx.model.extend('daily_property_investments', {
+    id: 'unsigned',
+    userId: 'string(64)',
+    projectId: 'unsigned',
+    amount: 'double',
+    shareRatio: 'double',       // amount / fundingRequired
+    investedAt: 'timestamp(3)',
+    status: 'string(16)',       // active / collected / refunded
+    payout: 'double',
+    settledAt: 'timestamp(3)',
+  }, {
+    primary: 'id',
+    autoInc: true,
+    unique: [['userId', 'projectId']],
+    index: [['userId'], ['projectId'], ['status']],
   })
 }

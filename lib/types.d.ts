@@ -146,6 +146,8 @@ export interface StoneTypeRow {
     basePrice: number;
     affixPool: string;
     rarityWeights: string;
+    /** v1.16.0：JSON 字符串，列出该类石头支持的产地 + 配置 */
+    originCatalog?: string | null;
     updatedAt: Date;
 }
 /** v1.15.0：赌石 — 当前市场库存 */
@@ -153,6 +155,10 @@ export interface StoneMarketRow {
     id: number;
     stoneType: string;
     priceTier: number;
+    /** v1.16.0：产地代码 */
+    origin?: string;
+    /** v1.16.0：5 维属性的 JSON 字符串 */
+    attributes?: string;
     listedAt: Date;
     expiresAt: Date;
 }
@@ -162,9 +168,19 @@ export interface StoneInventoryRow {
     userId: string;
     stoneType: string;
     priceTier: number;
+    /** v1.16.0：产地代码（从市场快照） */
+    origin?: string;
+    /** v1.16.0：切前 5 维属性（切后保留） */
+    attributes?: string;
     boughtAt: Date;
     cutAt: Date | null;
     rarity: string | null;
+    /** v1.16.0：trash 子分类（sandstone / limestone / ore / cracked / blinded / fake_skin） */
+    wasteSubtype?: string | null;
+    /** v1.16.0：切开时生成的完整评语 */
+    comment?: string | null;
+    /** v1.16.0：综合评级（A+ / A / B+ / B / C / D） */
+    grade?: string | null;
     affixes: string;
     saleMultiplier: number;
     status: 'holding' | 'cut' | 'sold' | string;

@@ -94,7 +94,7 @@ export interface Config {
     propertyEnabled: boolean;
     /** 房产行情刷新间隔（小时）；越短波动越频繁 */
     propertyUpdateIntervalHours: number;
-    /** 每 tick 随机涨跌基础幅度（百分比，0.05 = ±5%） */
+    /** 每小时 随机涨跌基础幅度（百分比，0.05 = ±5%） */
     propertyTickVolatility: number;
     /** 收租间隔（小时）：每 N 小时按租收益率发一次租金 */
     propertyRentIntervalHours: number;
@@ -110,11 +110,11 @@ export interface Config {
     propertyBubbleThreshold: number;
     /** 泡沫破裂时价格暴跌比例（0.5 = 跌 50%）；同时清零泡沫 */
     propertyCrashRatio: number;
-    /** 每 tick 政策调控触发概率（含限购/限售/加税） */
+    /** 每小时 政策调控触发概率（含限购/限售/加税） */
     propertyPolicyChance: number;
-    /** 每 tick 自然灾害触发概率（含地震/洪水） */
+    /** 每小时 自然灾害触发概率（含地震/洪水） */
     propertyDisasterChance: number;
-    /** 每 tick 利率上调触发概率；上调后估值下降 N% */
+    /** 每小时 利率上调触发概率；上调后估值下降 N% */
     propertyInterestUpChance: number;
     /** 单用户最大持有房产数 */
     propertyMaxProperties: number;
@@ -124,7 +124,7 @@ export interface Config {
     propertyDerelictDiscount: number;
     /** 烂尾楼租金系数（0 = 完全不出租，0.1 = 仅 10% 租金） */
     propertyDerelictRentFactor: number;
-    /** 每 tick 烂尾整治处理概率（0.5 = 50% 概率会影响到该区域烂尾楼） */
+    /** 每小时 烂尾整治处理概率（0.5 = 50% 概率会影响到该区域烂尾楼） */
     propertyDerelictRescueChance: number;
     /** 烂尾整治"回购"路径时给原房主的返还比例（0.3 = 30%） */
     propertyDerelictBuybackRate: number;
@@ -134,12 +134,40 @@ export interface Config {
     propertyListingExpiryHours: number;
     /** P2P 挂牌服务费比例（0.02 = 2% 平台抽成，与交易税分开） */
     propertyListingFee: number;
-    /** 每 tick 升值政策触发概率（旧改 / 新区规划 / 地铁 / 经济特区 / 利率下调） */
+    /** 每小时 升值政策触发概率（旧改 / 新区规划 / 地铁 / 经济特区 / 利率下调） */
     propertyAppreciationChance: number;
-    /** 每 tick 危机政策触发概率（强制拆迁 等） */
+    /** 每小时 危机政策触发概率（强制拆迁 等） */
     propertyCrisisChance: number;
-    /** 每 tick 利率下调触发概率；下调后该 tick 估值上升 N% */
+    /** 每小时 利率下调触发概率；下调后该小时 估值上升 N% */
     propertyInterestDownChance: number;
+    /** 是否启用 v1.17.0 楼盘开发系统（关闭后只剩旧的 NPC 二手急售市场） */
+    propertyDevEnabled: boolean;
+    /** 投资档位金额（积分）：从小到大；玩家选档位，系统按楼盘规模配份额 */
+    propertyDevInvestmentTiers: number[];
+    /** 投资者购房折扣（0.85 = 85 折） */
+    propertyDevInvestorDiscount: number;
+    /** 投资者优先窗口期 小时数（开盘后 N 小时内只对投资者开放，且按投资额排名） */
+    propertyDevPresalePriorityTicks: number;
+    /** 规划→施工 期望 小时数（±1 随机） */
+    propertyDevPlanningTicks: number;
+    /** 施工→开盘 期望 小时数（±2 随机） */
+    propertyDevBuildingTicks: number;
+    /** 开盘→售罄 期望 小时数（售罄后 N 小时 竣工） */
+    propertyDevPresaleTicks: number;
+    /** 施工/规划中项目烂尾概率（每小时 独立判定） */
+    propertyDevDerelictChance: number;
+    /** 烂尾退款率（投资额 × 此系数退还给投资者） */
+    propertyDevDerelictRefundRate: number;
+    /** 竣工回报率下限（fundingCollected × 此值 = 分红池下限） */
+    propertyDevReturnMin: number;
+    /** 竣工回报率上限 */
+    propertyDevReturnMax: number;
+    /** 投资档位每日投资次数上限（防止同一玩家刷多份） */
+    propertyDevInvestDailyLimit: number;
+    /** 二手急售市场降价比例（0.85 = 85 折） */
+    propertyDevResaleDiscount: number;
+    /** 二手急售市场买到烂尾楼的概率（高于一手的 8%） */
+    propertyDevResaleDerelictChance: number;
     /** 启用赌石 */
     stoneEnabled: boolean;
     /** 5 档原石购入价（积分）；索引对应 priceTier 0..4 */

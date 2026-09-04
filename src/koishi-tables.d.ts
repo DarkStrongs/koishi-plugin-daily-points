@@ -231,12 +231,15 @@ declare module 'koishi' {
       basePrice: number
       affixPool: string
       rarityWeights: string
+      originCatalog?: string | null
       updatedAt: Date
     }
     daily_stone_market: {
       id: number
       stoneType: string
       priceTier: number
+      origin?: string
+      attributes?: string
       listedAt: Date
       expiresAt: Date
     }
@@ -245,9 +248,14 @@ declare module 'koishi' {
       userId: string
       stoneType: string
       priceTier: number
+      origin?: string
+      attributes?: string
       boughtAt: Date
       cutAt: Date | null
       rarity: string | null
+      wasteSubtype?: string | null
+      comment?: string | null
+      grade?: string | null
       affixes: string
       saleMultiplier: number
       status: string
