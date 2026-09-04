@@ -7,10 +7,14 @@ export interface SigninDeps {
   ctx: Context
   config: Config
   core: CoreUtils
+  /** 签到成功后触发的副作用钩子（由 signin.bonus 提供） */
+  onSigninSuccess?: (userId: string, streak: number, pointsAwarded: number) => Promise<{ grantedCard: boolean; poolTax: number }>
+  /** 查用户当前补签卡数量 */
+  getCardCount?: (userId: string) => Promise<number>
 }
 
 /** 注册签到 / 查询 / 排行 / 转移 / 修改 五个命令 */
-export function registerSignin({ ctx, config, core }: SigninDeps): void {
+export function registerSignin({ ctx, config, core, onSigninSuccess, getCardCount }: SigninDeps): void {
   ctx.command('经济/积分/签到', '每日签到领取积分')
     .alias('qd', '积分签到', '领取积分', 'daily-points')
     .action(async ({ session }) => {
@@ -36,6 +40,21 @@ export function registerSignin({ ctx, config, core }: SigninDeps): void {
         lastDate: today,
         lastClaim: new Date(),
       })
+
+      // v1.8.0 钩子：写明细 + 抽水入月池 + 可能发补签卡
+      let grantedCard = false
+      let poolTax = 0
+      if (onSigninSuccess) {
+        try {
+          const r = await onSigninSuccess(key, streak, gain)
+          grantedCard = r.grantedCard
+          poolTax = r.poolTax
+        } catch (e: any) {
+          // 钩子失败不影响主流程（已落库的核心数值不会回滚，但本设计允许滞后补写）
+          // 这里只是 toast，不做特别处理
+        }
+      }
+
       const lines = [
         `签到成功！获得 ${gain} 积分`,
         `（基础 ${config.basePoints} + 随机 ${bonus} + 连续签到 ${streakGain}）`,
@@ -46,6 +65,12 @@ export function registerSignin({ ctx, config, core }: SigninDeps): void {
       }
       if (blackUntil) {
         lines.push(`⚠️ 破产惩罚期内，签到收益减半（${fmtTime(blackUntil)} 恢复信用）。`)
+      }
+      if (poolTax > 0) {
+        lines.push(`💰 其中 ${poolTax} 积分已自动入月度奖池（${new Date().toISOString().slice(0, 7)} 期）`)
+      }
+      if (grantedCard) {
+        lines.push(`🎟 恭喜！连续签到 ${streak} 天达成，赠送你 1 张补签卡（发送「补签」可补回过去 ${config.makeupWindowDays} 天内漏签日期）`)
       }
       return lines.join('\n')
     })
@@ -77,6 +102,10 @@ export function registerSignin({ ctx, config, core }: SigninDeps): void {
         }
       }
       lines.push(`累计签到获得：${row.totalEarned}，连续签到：${row.streak} 天`)
+      if (getCardCount) {
+        const cards = await getCardCount(key)
+        if (cards > 0) lines.push(`🎟 补签卡：${cards} 张（发送「日历」看本月出勤 / 「补签」补回漏签）`)
+      }
       return lines.join('\n')
     })
 

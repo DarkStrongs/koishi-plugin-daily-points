@@ -16,6 +16,8 @@ export interface LotteryHelpers {
     ensureLotteryPeriod(): Promise<any>;
     drawLotteryIfDue(force?: boolean): Promise<any>;
     scheduleDraws(): void;
+    /** 检查奖池是否跨过里程碑（用于买票后即时触发） */
+    checkPoolMilestones?(poolAmount: number): Promise<void>;
 }
 /** 彩票系统：买票 + 定期开奖 + 全局奖池滚存 */
 export declare function registerLottery({ ctx, config, core, casino, logger }: LotteryDeps): LotteryHelpers;

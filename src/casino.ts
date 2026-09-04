@@ -62,6 +62,9 @@ export function registerCasino({ ctx, config, core }: CasinoDeps): CasinoHelpers
         '  猜大小 押注 大|小 —— 两个骰子，2-6 为小、8-12 为大；7 点庄家通吃',
         '  轮盘 押注 红|黑|单|双 —— 0-36 中随机一格，按红黑/单双赔率结算',
         '  21点 押注 —— 玩家和庄家各两张起手，按硬规则补到 ≥17，比点数',
+        '  老虎机 押注 —— 3 个相同赢 50×，2 个相同赢 2×，全不中输',
+        '  百家乐 押注 庄|闲|和 —— 各抽 1 张比大小，赔率 0.95 / 1.0 / 8.0',
+        '  牛牛 押注 —— 抽 5 张，凑出 3 张整 10 倍数算有牛，1:2 赢',
         '',
         `通用规则：单笔 ${config.casinoMinBet} ~ ${config.casinoMaxBet} 积分，押注间隔 ${config.casinoCooldownSeconds} 秒；赢了 1:1 赔付（含本金），输了按 ${(config.casinoHouseEdge * 100).toFixed(0)}% 抽水入奖池。`,
       ].join('\n')
@@ -256,6 +259,146 @@ export function registerCasino({ ctx, config, core }: CasinoDeps): CasinoHelpers
       const poolFee = Math.floor(n * config.casinoHouseEdge)
       const newPool = await feedCasinoPool(poolFee)
       lines.push(`❌ ${pScore} vs ${dScore}，点数小或平，输掉 ${n}（其中 ${poolFee} 入奖池 ${fmtMoney(newPool)}）`)
+      lines.push(`当前现金：${row.points - n}`)
+      return lines.join('\n')
+    })
+
+  // ── v1.9.0 新增：老虎机 / 百家乐 / 牛牛 ─────────────────────
+
+  /** 老虎机符号（6 种 emoji 凑对） */
+  const SLOT_SYMBOLS = ['🍒', '🍋', '🍉', '🔔', '⭐', '7️⃣']
+
+  /** 通用押注前校验 + 冷却 + 现金判断；返回 null 通过 / 返回字符串报错 */
+  async function preBet(key: string, amount: string, row: { points: number }): Promise<{ n: number } | string> {
+    const n = parseInt(amount)
+    if (!Number.isFinite(n) || n <= 0) return '请输入正确的金额（正整数）。'
+    if (n < config.casinoMinBet) return `单笔最低 ${config.casinoMinBet}。`
+    if (n > config.casinoMaxBet) return `单笔最高 ${config.casinoMaxBet}。`
+    if (n > row.points) return `现金不足（当前 ${row.points}）。`
+    const cd = await checkCasinoCooldown(key)
+    if (cd) return cd
+    return { n }
+  }
+
+  ctx.command('经济/娱乐/赌场/老虎机 <amount:string>', '老虎机：3 个相同赢 50×，2 个相同赢 2×')
+    .alias('slot', 'slots', '水果机')
+    .action(async ({ session }, amount) => {
+      if (!session.userId) return
+      if (!config.casinoEnabled) return '赌场系统未开启。'
+      const key = userKey(session)
+      const row = await core.getUser(key)
+      const prep = await preBet(key, amount, row)
+      if (typeof prep === 'string') return prep
+      const n = prep.n
+      const s1 = SLOT_SYMBOLS[randomInt(0, SLOT_SYMBOLS.length - 1)]
+      const s2 = SLOT_SYMBOLS[randomInt(0, SLOT_SYMBOLS.length - 1)]
+      const s3 = SLOT_SYMBOLS[randomInt(0, SLOT_SYMBOLS.length - 1)]
+      const lines = [`🎰 老虎机：${s1} | ${s2} | ${s3}`]
+      if (s1 === s2 && s2 === s3) {
+        // 大奖：净赚 50 × n
+        const payout = n + n * 50
+        return await core.dbTx(async (db) => {
+          const dbAny: any = db
+          await dbAny.set('daily_points', { userId: key }, { points: row.points + payout })
+          lines.push(`🎉 三连 ${s1}！头奖 50×，到手 ${payout}（含本金），现金：${row.points + payout}`)
+          return lines.join('\n')
+        })
+      }
+      if (s1 === s2 || s2 === s3 || s1 === s3) {
+        // 小奖：净赚 2 × n（含本金）
+        const payout = n + n * 2
+        return await core.dbTx(async (db) => {
+          const dbAny: any = db
+          await dbAny.set('daily_points', { userId: key }, { points: row.points + payout })
+          lines.push(`✨ 两连！小奖 2×，到手 ${payout}（含本金），现金：${row.points + payout}`)
+          return lines.join('\n')
+        })
+      }
+      const poolFee = Math.floor(n * config.casinoHouseEdge)
+      const newPool = await feedCasinoPool(poolFee)
+      lines.push(`❌ 三个都不一样，输掉 ${n}（其中 ${poolFee} 入奖池 ${fmtMoney(newPool)}）`)
+      lines.push(`当前现金：${row.points - n}`)
+      return lines.join('\n')
+    })
+
+  ctx.command('经济/娱乐/赌场/百家乐 <amount:string> <pick:string>', '百家乐：庄/闲/和，赔率 0.95 / 1.0 / 8.0')
+    .alias('baccarat', '庄闲')
+    .action(async ({ session }, amount, pick) => {
+      if (!session.userId) return
+      if (!config.casinoEnabled) return '赌场系统未开启。'
+      const key = userKey(session)
+      const row = await core.getUser(key)
+      const prep = await preBet(key, amount, row)
+      if (typeof prep === 'string') return prep
+      const n = prep.n
+      let pickEn: string | null = null
+      if (pick === '庄' || pick.includes('庄')) pickEn = 'banker'
+      else if (pick === '闲' || pick.includes('闲')) pickEn = 'player'
+      else if (pick === '和' || pick.includes('和')) pickEn = 'tie'
+      if (!pickEn) return '请输入「庄」「闲」或「和」，例如「百家乐 100 庄」。'
+      const banker = randomInt(0, 9)
+      const player = randomInt(0, 9)
+      const bankerWin = banker > player
+      const playerWin = player > banker
+      const isTie = banker === player
+      const lines = [`🎴 庄 ${banker} | 闲 ${player}${isTie ? '（和）' : ''}`]
+      let won = false, mult = 0
+      if (pickEn === 'banker' && bankerWin) { won = true; mult = 0.95 }
+      else if (pickEn === 'player' && playerWin) { won = true; mult = 1.0 }
+      else if (pickEn === 'tie' && isTie) { won = true; mult = 8.0 }
+      if (won) {
+        // 净赚 mult × n（含本金）→ 总到手 = n + n*mult
+        const payout = Math.floor(n + n * mult)
+        return await core.dbTx(async (db) => {
+          const dbAny: any = db
+          await dbAny.set('daily_points', { userId: key }, { points: row.points + payout })
+          lines.push(`✅ 命中！赔率 ${mult}×，到手 ${payout}（含本金），现金：${row.points + payout}`)
+          return lines.join('\n')
+        })
+      }
+      const poolFee = Math.floor(n * config.casinoHouseEdge)
+      const newPool = await feedCasinoPool(poolFee)
+      lines.push(`❌ 没中，输掉 ${n}（其中 ${poolFee} 入奖池 ${fmtMoney(newPool)}）`)
+      lines.push(`当前现金：${row.points - n}`)
+      return lines.join('\n')
+    })
+
+  ctx.command('经济/娱乐/赌场/牛牛 <amount:string>', '牛牛：抽 5 张，凑出 3 张整 10 倍数算有牛，1:2 赢')
+    .alias('niuniu', '妞妞')
+    .action(async ({ session }, amount) => {
+      if (!session.userId) return
+      if (!config.casinoEnabled) return '赌场系统未开启。'
+      const key = userKey(session)
+      const row = await core.getUser(key)
+      const prep = await preBet(key, amount, row)
+      if (typeof prep === 'string') return prep
+      const n = prep.n
+      // 抽 5 张（1-10），判断能否选 3 张组成整 10 倍数
+      const hand: number[] = []
+      for (let i = 0; i < 5; i++) hand.push(randomInt(1, 10))
+      const handStr = hand.join(' ')
+      // 5 选 3 共 10 种组合，遍历任一组合 mod 10 == 0 即有牛
+      const hasNiu = (() => {
+        for (let i = 0; i < 5; i++)
+          for (let j = i + 1; j < 5; j++)
+            for (let k = j + 1; k < 5; k++)
+              if ((hand[i] + hand[j] + hand[k]) % 10 === 0) return true
+        return false
+      })()
+      const lines = [`🐂 牛牛：${handStr}`]
+      if (hasNiu) {
+        // 1:2 赢（含本金）→ 到手 = 2n
+        const payout = n * 2
+        return await core.dbTx(async (db) => {
+          const dbAny: any = db
+          await dbAny.set('daily_points', { userId: key }, { points: row.points + payout })
+          lines.push(`🐄 有牛！1:2 赢，到手 ${payout}（含本金），现金：${row.points + payout}`)
+          return lines.join('\n')
+        })
+      }
+      const poolFee = Math.floor(n * config.casinoHouseEdge)
+      const newPool = await feedCasinoPool(poolFee)
+      lines.push(`❌ 无牛，输掉 ${n}（其中 ${poolFee} 入奖池 ${fmtMoney(newPool)}）`)
       lines.push(`当前现金：${row.points - n}`)
       return lines.join('\n')
     })

@@ -4,6 +4,8 @@ import { registerModels } from './db'
 import { createCore } from './core'
 import { registerGlueMiddleware } from './middleware'
 import { registerSignin } from './signin'
+import { registerBonus } from './signin.bonus'
+import { registerCalendar } from './signin.calendar'
 import { registerBank } from './bank'
 import { registerLoan } from './loan'
 import { registerStock } from './stock'
@@ -18,11 +20,11 @@ export const inject = { required: ['database'], optional: ['puppeteer'] }
 export const usage = `签到积分 + 银行 + 股票 + 贷款 + 娱乐 插件。
 发送「经济」可查看全部指令菜单。
 直接发送短名即可调用：
-  积分：签到 / 查询 / 排行 / 转移 / 修改
+  积分：签到 / 查询 / 排行 / 转移 / 修改 / 日历 / 补签
   银行：存款 / 取款 / 定期存款 / 定期列表 / 定期取出 / 银行（资产总览）
   贷款：贷款（正常） / 高利贷 / 还款（可指定ID） / 欠款 / 打工 / 破产
   股票：股票 / K线 / 买入 / 卖出 / 持仓
-  娱乐：赌场 / 猜大小 / 轮盘 / 21点 / 彩票 / 刮刮乐 / 抢劫
+  娱乐：赌场（猜大小/轮盘/21点/老虎机/百家乐/牛牛）｜彩票（支持自选号码）｜刮刮乐｜抢劫 @人
 （旧写法「积分签到 / 我的积分 / 积分排行 / 积分转移」同样有效）`
 
 // 兼容 Koishi 默认从 index 拿 Config / apply 的导出风格
@@ -42,10 +44,13 @@ export function apply(ctx: Context, config: Config) {
   // 注意注入顺序：
   //   bank 需要 loan.settleUserLoans，故 loan 先注册
   //   lottery / robbery 需要 casino，故 casino 先注册
+  //   signin 需要 bonus 的 onSigninSuccess / getCardCount 钩子，故 bonus 先注册
   const loanHelpers = registerLoan({ ctx, config, core, logger })
   const bankDeps = { ctx, config, core, settleUserLoans: loanHelpers.settleUserLoans }
   registerBank(bankDeps)
-  registerSignin({ ctx, config, core })
+  const bonusHelpers = registerBonus({ ctx, config, core, logger })
+  registerSignin({ ctx, config, core, onSigninSuccess: bonusHelpers.onSigninSuccess, getCardCount: bonusHelpers.getCardCount })
+  registerCalendar({ ctx, config, core })
   const stockHelpers = registerStock({ ctx, config, core, logger })
   const casinoHelpers = registerCasino({ ctx, config, core })
   const lotteryHelpers = registerLottery({
@@ -66,6 +71,7 @@ export function apply(ctx: Context, config: Config) {
   loanHelpers.scheduleCollectors()
   stockHelpers.scheduleUpdates()
   lotteryHelpers.scheduleDraws()
+  bonusHelpers.scheduleMonthlyDistribution()
 
   // 6. 经济系统总菜单（二级分组，避免 help 一屏刷满）
   ctx.command('经济', '经济系统总菜单（积分 / 银行 / 贷款 / 股票 / 娱乐）')
@@ -73,7 +79,7 @@ export function apply(ctx: Context, config: Config) {
       return [
         '🏦 经济系统指令一览',
         '',
-        '💰 积分：签到｜查询｜排行｜转移 @人 数量',
+        '💰 积分：签到｜查询｜排行｜转移 @人 数量｜日历｜补签',
         '🏦 银行：存款｜取款｜定期存款｜定期列表｜定期取出｜银行（资产总览）',
         '💳 贷款：贷款（正常）｜高利贷｜还款（可指定ID）｜欠款｜打工｜破产',
         '📈 股票：股票（行情）｜K线（走势图）｜买入｜卖出｜持仓',
@@ -84,15 +90,17 @@ export function apply(ctx: Context, config: Config) {
       ].join('\n')
     })
 
-  ctx.command('经济/积分', '积分分组：签到 / 查询 / 排行 / 转移 / 修改')
+  ctx.command('经济/积分', '积分分组：签到 / 查询 / 排行 / 转移 / 修改 / 日历 / 补签')
     .action(() => {
       return [
         '💰 积分指令：',
-        '  签到 —— 每日签到领积分，连续签到奖励递增',
-        '  查询 —— 查询现金、存款、股票市值与欠款',
+        '  签到 —— 每日签到领积分，连续签到奖励递增；每 7 天赠 1 张补签卡',
+        '  查询 —— 查询现金、存款、股票市值、欠款、连续天数与补签卡',
         '  排行 —— 积分排行榜',
         '  转移 @某人 数量 —— 把积分转给别人',
         '  修改 @某人 数量 —— 管理员调整积分（3 级权限）',
+        '  日历 [YYYY-MM] —— 查看签到日历（月度格子图），留空看当月',
+        '  补签 [日期] —— 用补签卡补回过去漏签日期（保留连胜），留空补昨天',
         '',
         '（旧写法「积分签到 / 我的积分 / 积分排行 / 积分转移」同样有效）',
       ].join('\n')

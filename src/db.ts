@@ -183,4 +183,42 @@ export function registerModels(ctx: Context): void {
   }, {
     primary: 'userId',
   })
+
+  // 签到明细（v1.8.0）
+  ctx.model.extend('daily_signin_log', {
+    id: 'unsigned',
+    userId: 'string(64)',
+    date: 'string(10)',
+    points: 'unsigned',
+    source: 'string(16)',
+    createdAt: 'timestamp(3)',
+  }, {
+    primary: 'id',
+    autoInc: true,
+    index: [['userId', 'date']],
+  })
+
+  // 用户道具（v1.8.0：通用库存表，首用 = 补签卡）
+  ctx.model.extend('daily_props', {
+    id: 'unsigned',
+    userId: 'string(64)',
+    type: 'string(32)',
+    quantity: 'unsigned',
+    issuedAt: 'timestamp(3)',
+    meta: 'string(128)',
+  }, {
+    primary: 'id',
+    autoInc: true,
+    unique: [['userId', 'type']],
+  })
+
+  // 月度签到奖池（v1.8.0：每月一条，主键 YYYY-MM）
+  ctx.model.extend('daily_signin_pool', {
+    monthKey: 'string(7)',
+    totalPool: 'double',
+    distributedAt: 'timestamp(3)',
+    shareCount: 'unsigned',
+  }, {
+    primary: 'monthKey',
+  })
 }

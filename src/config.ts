@@ -10,6 +10,17 @@ export interface Config {
   timezoneOffset: number
   leaderboardSize: number
 
+  // 签到增强（v1.8.0）：补签卡
+  makeupCardStreakDays: number
+  makeupWindowDays: number
+  makeupPayoutRate: number
+
+  // 月度签到奖池（v1.8.0）
+  monthlyPoolEnabled: boolean
+  monthlyPoolBase: number
+  monthlyPoolTaxRate: number
+  monthlyStreakThreshold: number
+
   // 银行
   bankHourlyRate: number
   fixedRate3: number
@@ -99,7 +110,16 @@ export const Config = Schema.intersect([
     maxStreakBonus: Schema.number().default(30).min(0).description('连续签到奖励上限'),
     timezoneOffset: Schema.number().default(8).step(1).description('时区偏移（小时），用于判断一天的起止'),
     leaderboardSize: Schema.number().default(10).min(1).max(50).description('排行榜显示人数'),
+    makeupCardStreakDays: Schema.number().default(7).min(1).description('每连续签到多少天赠送 1 张补签卡'),
+    makeupWindowDays: Schema.number().default(7).min(1).description('补签可补的最大回溯天数（默认 7 天内）'),
+    makeupPayoutRate: Schema.number().default(0.6).min(0).max(1).step(0.05).description('补签积分系数（按当日应得积分的比例发放，0.6 = 60%）'),
   }).description('签到与积分设置'),
+  Schema.object({
+    monthlyPoolEnabled: Schema.boolean().default(true).description('启用月度签到奖池'),
+    monthlyPoolBase: Schema.number().default(1000).min(0).description('每月基础奖池（月初自动注入）'),
+    monthlyPoolTaxRate: Schema.number().default(0.05).min(0).max(0.5).step(0.01).description('每次签到按此比例抽水入当月奖池（0.05 = 5%）'),
+    monthlyStreakThreshold: Schema.number().default(28).min(1).max(31).description('当月连续签到满多少天才有资格瓜分奖池'),
+  }).description('月度奖池设置'),
   Schema.object({
     bankHourlyRate: Schema.number().default(0.001).min(0).description('活期存款每小时利率（0.001 = 每小时 0.1%）'),
     fixedRate3: Schema.number().default(0.01).min(0).description('定期 3 天：日利率'),

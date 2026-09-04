@@ -116,6 +116,28 @@ declare module 'koishi' {
       reason: string
       createdAt: Date
     }
+    daily_signin_log: {
+      id: number
+      userId: string
+      date: string
+      points: number
+      source: string
+      createdAt: Date
+    }
+    daily_props: {
+      id: number
+      userId: string
+      type: string
+      quantity: number
+      issuedAt: Date
+      meta: string | null
+    }
+    daily_signin_pool: {
+      monthKey: string
+      totalPool: number
+      distributedAt: Date | null
+      shareCount: number
+    }
   }
 
   interface Session {

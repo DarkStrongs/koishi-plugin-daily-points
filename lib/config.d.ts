@@ -7,6 +7,13 @@ export interface Config {
     maxStreakBonus: number;
     timezoneOffset: number;
     leaderboardSize: number;
+    makeupCardStreakDays: number;
+    makeupWindowDays: number;
+    makeupPayoutRate: number;
+    monthlyPoolEnabled: boolean;
+    monthlyPoolBase: number;
+    monthlyPoolTaxRate: number;
+    monthlyStreakThreshold: number;
     bankHourlyRate: number;
     fixedRate3: number;
     fixedRate7: number;

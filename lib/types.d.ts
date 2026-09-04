@@ -113,6 +113,31 @@ export interface JailRow {
     reason: string;
     createdAt: Date;
 }
+/** 签到明细（v1.8.0 新增） */
+export interface SigninLogRow {
+    id: number;
+    userId: string;
+    date: string;
+    points: number;
+    source: string;
+    createdAt: Date;
+}
+/** 用户道具（v1.8.0 新增：通用库存表，首个用途 = 补签卡） */
+export interface PropsRow {
+    id: number;
+    userId: string;
+    type: string;
+    quantity: number;
+    issuedAt: Date;
+    meta: string | null;
+}
+/** 月度签到奖池（v1.8.0 新增） */
+export interface MonthlyPoolRow {
+    monthKey: string;
+    totalPool: number;
+    distributedAt: Date | null;
+    shareCount: number;
+}
 /** 还款明细 */
 export interface RepayDetail {
     id: number;
