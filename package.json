@@ -1,0 +1,36 @@
+{
+  "name": "koishi-plugin-daily-points",
+  "version": "1.6.0",
+  "description": "每日签到领取积分：支持连续签到递增奖励、积分排行、积分转移、管理员调整",
+  "main": "lib/index.js",
+  "typings": "lib/index.d.ts",
+  "files": [
+    "lib",
+    "dist"
+  ],
+  "koishi": {
+    "description": {
+      "zh": "每日签到领取积分：连续签到有递增奖励，支持排行、转账和管理员调整，数据存 SQLite/数据库"
+    },
+    "service": {
+      "required": [
+        "database"
+      ]
+    },
+    "locales": [
+      "zh"
+    ]
+  },
+  "keywords": [
+    "chatbot",
+    "koishi",
+    "plugin",
+    "daily",
+    "points",
+    "签到"
+  ],
+  "license": "MIT",
+  "peerDependencies": {
+    "koishi": "^4.18.0"
+  }
+}
